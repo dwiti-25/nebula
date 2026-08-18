@@ -1,0 +1,5 @@
+* SKY130 + NGSPICE configuration
+
+set ngbehavior=hsa
+set skywaterpdk
+set ng_nomodcheck

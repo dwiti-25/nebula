@@ -1,0 +1,19 @@
+# Simulation outputs
+*.txt
+
+# Local ngspice/library binaries
+*.dylib
+*.so
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Local PDK / CIEL
+.ciel/
+local_backup/

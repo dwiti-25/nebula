@@ -1,0 +1,16 @@
+* SKY130 NMOS sanity test
+
+.lib /Users/dwitisuchak/.ciel/sky130A/libs.tech/ngspice/sky130.lib.spice tt
+
+VDD vdd 0 1.8
+VG gate 0 0
+
+Rload vdd drain 1k
+
+X1 drain gate 0 0 sky130_fd_pr__nfet_01v8 W=10 L=0.15
+
+.dc VG 0 1.8 0.01
+
+.print dc v(drain) i(VDD)
+
+.end

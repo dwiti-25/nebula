@@ -1,0 +1,33 @@
+* SKY130 CTLE - properly biased differential pair
+
+.lib /Users/dwitisuchak/.ciel/sky130A/libs.tech/ngspice/sky130.lib.spice tt
+
+VDD vdd 0 1.8
+
+* Differential input
+* Raised common-mode voltage so the NMOS pair is ON
+VINP inp 0 DC 1.2 AC 0.5
+VINN inn 0 DC 1.2 AC -0.5
+
+* Resistive loads
+RDP vdd outp 1k
+RDN vdd outn 1k
+
+* NMOS differential pair
+XMP outp inp srcp 0 sky130_fd_pr__nfet_01v8 W=10 L=0.15
+XMN outn inn srcn 0 sky130_fd_pr__nfet_01v8 W=10 L=0.15
+
+* Source degeneration
+RS1 srcp tail 100
+RS2 srcn tail 100
+
+* Tail current
+ITAIL tail 0 DC 100u
+
+.op
+
+.ac dec 100 1Meg 10Gig
+
+.print ac v(outp) v(outn)
+
+.end
