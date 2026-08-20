@@ -1,5 +1,10 @@
 # Simulation outputs
 *.txt
+*.log
+*.raw
+results/*.jsonl
+results/*.csv
+generated/
 
 # Local ngspice/library binaries
 *.dylib

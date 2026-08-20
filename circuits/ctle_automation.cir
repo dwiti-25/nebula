@@ -1,0 +1,42 @@
+* SKY130 CTLE - portable automation netlist derived from ctle_start.cir
+
+.lib "@@SKY130_MODEL_LIBRARY@@" tt
+
+.param RLOAD=1k
+.param RDEG=1k
+.param CDEG=0.5p
+.param ITAIL_VAL=100u
+
+VDD vdd 0 1.8
+VINP inp 0 DC 1.2 AC 0.5
+VINN inn 0 DC 1.2 AC -0.5
+
+RDP vdd outp {RLOAD}
+RDN vdd outn {RLOAD}
+XMP outp inp srcp 0 sky130_fd_pr__nfet_01v8 W=10 L=0.15
+XMN outn inn srcn 0 sky130_fd_pr__nfet_01v8 W=10 L=0.15
+RS1 srcp tail {RDEG}
+RS2 srcn tail {RDEG}
+CD1 srcp tail {CDEG}
+CD2 srcn tail {CDEG}
+ITAIL tail 0 DC {ITAIL_VAL}
+
+.control
+set noaskquit
+op
+let outp_dc_v = v(outp)
+let outn_dc_v = v(outn)
+let vdd_current_a = i(VDD)
+print outp_dc_v outn_dc_v vdd_current_a
+
+ac dec 100 1Meg 110Gig
+let vdiff = v(outp) - v(outn)
+let vdiff_mag = mag(vdiff)
+meas ac gain_1mhz_mag FIND vdiff_mag AT=1Meg
+meas ac gain_2p5ghz_mag FIND vdiff_mag AT=2.5Gig
+meas ac gain_5ghz_mag FIND vdiff_mag AT=5Gig
+meas ac gain_100ghz_mag FIND vdiff_mag AT=100Gig
+quit
+.endc
+
+.end

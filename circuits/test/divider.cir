@@ -1,0 +1,9 @@
+* Parameterized resistor-divider integration fixture
+.param RVAL=1k
+V1 in 0 DC 1
+R1 in out {RVAL}
+R2 out 0 1k
+
+.tran 1n 2n
+.measure tran vout FIND v(out) AT=1n
+.end
