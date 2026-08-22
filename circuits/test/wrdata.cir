@@ -1,0 +1,13 @@
+* Portable wrdata integration fixture
+V1 in 0 PULSE(0 1 0 1n 1n 4n 10n)
+R1 in out 1k
+C1 out 0 1p
+.control
+set noaskquit
+set wr_singlescale
+set wr_vecnames
+tran 100p 20n
+wrdata @@OUTPUT_FILE@@ v(in) v(out)
+quit
+.endc
+.end

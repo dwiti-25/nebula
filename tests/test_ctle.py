@@ -18,6 +18,7 @@ BASELINE = {"RLOAD": "1k", "RDEG": "1k", "CDEG": "0.5p", "ITAIL_VAL": "100u"}
 class CTLEParameterTests(unittest.TestCase):
     def test_parses_spice_suffixes(self):
         self.assertEqual(spice_number("1k"), 1000)
+        self.assertEqual(spice_number("750"), 750)
         self.assertAlmostEqual(spice_number("0.5p"), 0.5e-12)
         self.assertAlmostEqual(spice_number("100u"), 100e-6)
 

@@ -1,0 +1,32 @@
+* Nebula CTLE DC operating-point bench
+.lib "@@SKY130_MODEL_LIBRARY@@" @@PROCESS_CORNER@@
+.include "@@CTLE_BLOCK_FILE@@"
+
+.param RLOAD=1k RDEG=1k CDEG=0.5p ITAIL_VAL=100u
+.param VDD_VAL=1.8 VIN_CM=1.2 CLOAD=20f
+.temp @@TEMPERATURE_C@@
+
+VDD vdd 0 {VDD_VAL}
+VINP inp 0 {VIN_CM}
+VINN inn 0 {VIN_CM}
+CLOADP outp 0 {CLOAD}
+CLOADN outn 0 {CLOAD}
+XCTLE inp inn outp outn vdd 0 CTLE
++ RLOAD={RLOAD} RDEG={RDEG} CDEG={CDEG} ITAIL_VAL={ITAIL_VAL}
+
+.control
+set noaskquit
+op
+let inp_dc_v = v(inp)
+let inn_dc_v = v(inn)
+let outp_dc_v = v(outp)
+let outn_dc_v = v(outn)
+let srcp_dc_v = v(xctle.srcp)
+let srcn_dc_v = v(xctle.srcn)
+let tail_dc_v = v(xctle.tail)
+let vdd_current_a = i(VDD)
+print inp_dc_v inn_dc_v outp_dc_v outn_dc_v
+print srcp_dc_v srcn_dc_v tail_dc_v vdd_current_a
+quit
+.endc
+.end

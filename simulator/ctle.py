@@ -50,9 +50,10 @@ def spice_number(value: ParameterValue) -> float:
         number = float(value)
     else:
         match = _VALUE_RE.fullmatch(value.strip()) if isinstance(value, str) else None
-        if not match or match.group(2).lower() not in _SCALE:
+        suffix = (match.group(2) or "").lower() if match else ""
+        if not match or suffix not in _SCALE:
             raise ValueError(f"unsupported SPICE value: {value!r}")
-        number = float(match.group(1)) * _SCALE[match.group(2).lower()]
+        number = float(match.group(1)) * _SCALE[suffix]
     if not math.isfinite(number):
         raise ValueError("circuit values must be finite")
     return number

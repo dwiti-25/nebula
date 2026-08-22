@@ -1,0 +1,17 @@
+* Reusable one-stage SKY130 CTLE with source degeneration
+.subckt CTLE inp inn outp outn vdd vss
++ params: RLOAD=1k RDEG=1k CDEG=0.5p ITAIL_VAL=100u
+
+RDP vdd outp {RLOAD}
+RDN vdd outn {RLOAD}
+
+XMP outp inp srcp vss sky130_fd_pr__nfet_01v8 W=10 L=0.15
+XMN outn inn srcn vss sky130_fd_pr__nfet_01v8 W=10 L=0.15
+
+RS1 srcp tail {RDEG}
+RS2 srcn tail {RDEG}
+CD1 srcp tail {CDEG}
+CD2 srcn tail {CDEG}
+
+ITAIL tail vss DC {ITAIL_VAL}
+.ends CTLE

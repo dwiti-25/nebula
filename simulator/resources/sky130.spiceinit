@@ -1,0 +1,5 @@
+* Deterministic Nebula initialization for SKY130
+set ngbehavior=hsa
+set skywaterpdk
+set ng_nomodcheck
+set strict_errorhandling

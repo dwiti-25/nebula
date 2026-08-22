@@ -1,0 +1,8 @@
+{
+  "channel_id": "synthetic_regression",
+  "description": "Synthetic zero-phase low-pass channel for deterministic software tests only",
+  "measured_or_simulated": "synthetic",
+  "port_order": ["TX+", "TX-", "RX+", "RX-"],
+  "reference_impedance_ohm": 50,
+  "final_compliance_evidence": false
+}

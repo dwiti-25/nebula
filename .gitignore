@@ -5,6 +5,7 @@
 results/*.jsonl
 results/*.csv
 generated/
+.nebula-cache/
 
 # Local ngspice/library binaries
 *.dylib

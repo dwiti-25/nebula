@@ -24,6 +24,7 @@ class FailureStage(str, Enum):
 
 
 class FailureCode(str, Enum):
+    INTERNAL_ERROR = "internal_error"
     INVALID_PARAMETER = "invalid_parameter"
     NETLIST_NOT_FOUND = "netlist_not_found"
     NETLIST_READ_ERROR = "netlist_read_error"
@@ -37,6 +38,9 @@ class FailureCode(str, Enum):
     MEASUREMENT_MISSING = "measurement_missing"
     MEASUREMENT_PARSE_ERROR = "measurement_parse_error"
     SIMULATION_ERROR = "simulation_error"
+    OUTPUT_FILE_MISSING = "output_file_missing"
+    WAVEFORM_PARSE_ERROR = "waveform_parse_error"
+    CHANNEL_ERROR = "channel_error"
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,8 @@ class SimulationRequest:
     parameters: Mapping[str, ParameterValue] = field(default_factory=dict)
     expected_measurements: tuple[str, ...] = ()
     template_values: Mapping[str, str] = field(default_factory=dict)
+    output_files: Mapping[str, str] = field(default_factory=dict)
+    initialization_text: str | None = None
 
     def normalized_expected_measurements(self) -> tuple[str, ...]:
         return tuple(name.lower() for name in self.expected_measurements)
@@ -66,6 +72,8 @@ class SimulationResult:
     failure_stage: FailureStage | None = None
     failure_code: FailureCode | None = None
     retryable: bool = False
+    artifacts: dict[str, str] = field(default_factory=dict)
+    provenance: dict[str, object] = field(default_factory=dict)
 
     @property
     def success(self) -> bool:
