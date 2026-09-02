@@ -46,7 +46,7 @@ import torch
 from simulator.rl_adapter import ACTION_SCHEMA_VERSION, ReceiverRLAdapter, RLBudget
 
 from rl.autockt_env import AutoCktReceiverEnv
-from rl.autockt_reward import AUTOCKT_REWARD_VERSION
+from rl.autockt_reward import AUTOCKT_REWARD_VERSION, graded_autockt_reward
 from rl.autockt_state import STATE_DIM
 from rl.parameter_grid import (
     DEFAULT_GRID_POINTS,
@@ -149,6 +149,7 @@ def _evaluate_checkpoint(
     randomize_initial_state: bool,
     seed: int,
     episodes: int,
+    reward_fn=None,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     """[NEBULA ADAPTATION] Frozen-checkpoint evaluation, not part of the
     AutoCkt-replicated training loop itself. Runs `episodes` fully
@@ -172,6 +173,7 @@ def _evaluate_checkpoint(
         grids=grids,
         seed=seed,
         randomize_initial_state=randomize_initial_state,
+        reward_fn=reward_fn,
     )
     rows: list[dict[str, object]] = []
     episode_rewards = []
@@ -349,6 +351,19 @@ def main() -> int:
         "result, for experiments that must not warm-start PPO from a known-good design.",
     )
     parser.add_argument(
+        "--reward-mode", choices=("terminal", "graded"), default="terminal",
+        help="[NEBULA ADAPTATION] 'terminal' (default, unchanged existing behavior): "
+        "rl.autockt_reward.autockt_reward, a flat FAILURE_REWARD on any failure. "
+        "'graded': rl.autockt_reward.graded_autockt_reward -- identical on success; "
+        "additionally grades a `transient`-stage failure (real per-spec distances are "
+        "available) by the same relative-error-sum formula the success branch uses, "
+        "instead of the same flat penalty every failure gets under 'terminal'. Earlier-"
+        "stage failures (dc/ac/ctle_transient/channel, no real per-spec measurement) "
+        "still get a fixed floor either way. See rl/autockt_reward.py for the full "
+        "diagnosis this addresses (docs/autockt-mapping.md sec 20's zero-variance "
+        "reward collapse).",
+    )
+    parser.add_argument(
         "--save-final-policy", type=Path, default=None,
         help="[NEBULA ADAPTATION -- pure I/O, no formulation change] optional path to "
         "torch.save the trained policy's state_dict after training completes. Default "
@@ -358,6 +373,7 @@ def main() -> int:
     args = parser.parse_args()
 
     training_pool, validation_pool = _build_target_pools(args)
+    reward_fn = graded_autockt_reward if args.reward_mode == "graded" else None
 
     grids = build_parameter_grids(args.grid_points, spacing=args.grid_spacing)
     initial_indices = _resolve_initial_indices(grids, args.initial_indices_source)
@@ -376,6 +392,7 @@ def main() -> int:
         grids=grids,
         seed=args.seed,
         randomize_initial_state=args.randomize_initial_state,
+        reward_fn=reward_fn,
     )
     agent = PPOAgent(state_dim=STATE_DIM, num_heads=len(PARAMETER_NAMES), seed=args.seed)
     initial_policy_state = copy.deepcopy(agent.policy.state_dict()) if args.checkpoint_eval_episodes > 0 else None
@@ -415,6 +432,7 @@ def main() -> int:
                 "grid_points": args.grid_points,
                 "grid_spacing": args.grid_spacing,
                 "randomize_initial_state": args.randomize_initial_state,
+                "reward_mode": args.reward_mode,
             },
             indent=2,
             default=list,
@@ -452,6 +470,7 @@ def main() -> int:
                 randomize_initial_state=args.randomize_initial_state,
                 seed=checkpoint_seed,
                 episodes=args.checkpoint_eval_episodes,
+                reward_fn=reward_fn,
             )
             checkpoint_summaries.append(summary_row)
             print(json.dumps({"checkpoint_complete": True, **summary_row}, indent=2), flush=True)
@@ -474,6 +493,7 @@ def main() -> int:
         "validation_results": validation_rows,
         "checkpoint_evaluations": checkpoint_summaries,
         "seed": args.seed,
+        "reward_mode": args.reward_mode,
         "output": str(args.output),
     }
     print(json.dumps(summary, indent=2))

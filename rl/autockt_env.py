@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import random
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Optional, Sequence
 
 from simulator.rl_adapter import METRIC_OBSERVATION_NAMES, ReceiverRLAdapter
 
@@ -42,6 +42,21 @@ from .autockt_reward import TERMINAL_BONUS, autockt_reward
 from .autockt_state import STATE_DIM, build_state
 from .parameter_grid import ParameterGrid, PARAMETER_NAMES, build_parameter_grids
 from .target_spec import TargetSpec
+
+RewardFn = Callable[..., float]
+
+
+def _default_reward_fn(
+    metrics: Mapping[str, float], target: TargetSpec, *, success: bool, failure_stage: Optional[str],
+) -> float:
+    """[NEBULA ADAPTATION] wraps the locked, unmodified autockt_reward in the
+    richer (metrics, target, success, failure_stage) signature every
+    reward_fn must accept, so AutoCktReceiverEnv.step() can call whichever
+    reward function is plugged in identically -- ignores failure_stage,
+    exactly reproducing autockt_reward's own unchanged behavior.
+    """
+
+    return autockt_reward(metrics, target, success=success)
 
 
 def metrics_from_observation(observation: Sequence[float]) -> dict[str, float]:
@@ -122,6 +137,7 @@ class AutoCktReceiverEnv:
         grids: Mapping[str, ParameterGrid] | None = None,
         seed: int = 0,
         randomize_initial_state: bool = False,
+        reward_fn: Optional[RewardFn] = None,
     ):
         if not target_pool:
             raise ValueError("target_pool must be non-empty")
@@ -137,6 +153,13 @@ class AutoCktReceiverEnv:
         self._episode_rng = random.Random(seed)
         self.randomize_initial_state = randomize_initial_state
         self._init_rng = random.Random(seed)  # separate stream, see class docstring
+        # [NEBULA ADAPTATION] optional, additive: defaults to the exact prior
+        # behavior (autockt_reward, unmodified) via _default_reward_fn.
+        # Passing e.g. rl.autockt_reward.graded_autockt_reward here is the
+        # only way episode reward computation changes -- nothing else in
+        # this class does, and no existing caller that omits reward_fn sees
+        # any behavior change.
+        self.reward_fn: RewardFn = reward_fn if reward_fn is not None else _default_reward_fn
         self.target: TargetSpec | None = None
         self.indices: tuple[int, ...] = self.initial_indices
         self.step_count = 0
@@ -185,7 +208,9 @@ class AutoCktReceiverEnv:
         rl_step = self.adapter.step(normalized_action)
         metrics = metrics_from_observation(rl_step.observation)
         success = rl_step.info["failure_stage"] is None
-        reward = autockt_reward(metrics, self.target, success=success)
+        reward = self.reward_fn(
+            metrics, self.target, success=success, failure_stage=rl_step.info["failure_stage"],
+        )
         self.step_count += 1
         done = reward >= TERMINAL_BONUS
         truncated = self.step_count >= self.horizon
