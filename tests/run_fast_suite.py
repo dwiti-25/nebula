@@ -33,6 +33,7 @@ SPICE_FREE_MODULES = [
     "tests.test_learning_evidence",
     "tests.test_benchmark_report",
     "tests.test_web_ui",
+    "tests.test_broader_generalization_check",
 ]
 
 
