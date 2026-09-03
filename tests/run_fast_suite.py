@@ -36,6 +36,7 @@ SPICE_FREE_MODULES = [
     "tests.test_broader_generalization_check",
     "tests.test_rl_ppo_v2",
     "tests.test_rl_checkpoint",
+    "tests.test_rl_events",
 ]
 
 

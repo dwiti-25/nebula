@@ -351,6 +351,7 @@ class AutoCktReceiverEnv:
             "indices": self.indices,
             "metrics": metrics,
             "metrics_valid": metrics_valid,
+            "metrics_valid_mask": validity_mask_from_observation(rl_step.observation, METRIC_OBSERVATION_NAMES),
             "reward_result": reward_result,  # None unless use_reward_v2=True
         }
         return AutoCktStep(state, reward, done, truncated, info)
