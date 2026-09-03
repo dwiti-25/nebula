@@ -30,22 +30,33 @@ def apply_action(
     indices: Sequence[int],
     choices: Sequence[int],
     grids: Mapping[str, ParameterGrid],
+    *,
+    deltas: Sequence[int] = ACTION_DELTAS,
 ) -> tuple[int, ...]:
     """[AUTOCKT-REPLICATED] index update + clip.
 
-    `choices[i]` selects an entry of ACTION_DELTAS = (-1, 0, +2) for
-    parameter `PARAMETER_NAMES[i]`.
+    `choices[i]` selects an entry of `deltas` (ACTION_DELTAS = (-1, 0, +2)
+    by default, unchanged) for parameter `PARAMETER_NAMES[i]`.
+
+    [NEBULA ADAPTATION] `deltas` is additive, optional, and defaults to the
+    exact AutoCkt-replicated ACTION_DELTAS -- every existing call site is
+    byte-for-byte unchanged. Only the PPO model-improvement study's
+    optional symmetric-action ablation (Required change 7, variant 5)
+    passes a different tuple (e.g. (-1, 0, +1)), instrumented and compared
+    against, never silently substituted for the AutoCkt-replicated default.
     """
 
     if len(indices) != len(PARAMETER_NAMES):
         raise ValueError(f"expected {len(PARAMETER_NAMES)} indices, got {len(indices)}")
     if len(choices) != len(PARAMETER_NAMES):
         raise ValueError(f"expected {len(PARAMETER_NAMES)} choices, got {len(choices)}")
+    if len(deltas) != 3:
+        raise ValueError("deltas must have exactly 3 entries (one per Discrete(3) choice)")
     new_indices = []
     for name, index, choice in zip(PARAMETER_NAMES, indices, choices):
         if choice not in (0, 1, 2):
-            raise ValueError("each choice must be 0, 1, or 2 (an index into ACTION_DELTAS)")
-        delta = ACTION_DELTAS[choice]
+            raise ValueError("each choice must be 0, 1, or 2 (an index into deltas)")
+        delta = deltas[choice]
         new_indices.append(grids[name].clip_index(index + delta))
     return tuple(new_indices)
 
