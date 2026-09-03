@@ -241,7 +241,7 @@ class AutoCktReceiverEnv:
 
         return tuple(self.grids[name].normalized_index(i) for name, i in zip(PARAMETER_NAMES, self.indices))
 
-    def _budget_exhausted(self) -> bool:
+    def budget_exhausted(self) -> bool:
         """[NEBULA ADAPTATION -- Required change 4] checked before ANY
         adapter call (reset-time evaluation or step) -- see
         max_total_evaluations docstring above.
@@ -280,7 +280,7 @@ class AutoCktReceiverEnv:
         failure_stage: Optional[str] = "unevaluated"
         metrics_valid = False
         reset_evaluation_info: dict[str, object] = {"evaluated": False}
-        if self.evaluate_on_reset and not self._budget_exhausted():
+        if self.evaluate_on_reset and not self.budget_exhausted():
             normalized_action = indices_to_normalized_action(self.indices, self.grids)
             rl_step = self.adapter.step(normalized_action)
             metrics = metrics_from_observation(rl_step.observation)
@@ -299,7 +299,7 @@ class AutoCktReceiverEnv:
     def step(self, choices: Sequence[int]) -> AutoCktStep:
         if self.target is None:
             raise RuntimeError("call reset() before step()")
-        if self._budget_exhausted():
+        if self.budget_exhausted():
             # [NEBULA ADAPTATION -- Required change 4] "Do not attempt one
             # additional simulator call after exhaustion": truncate
             # cleanly with no adapter call at all, rather than letting

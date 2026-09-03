@@ -438,5 +438,37 @@ class BudgetAwareTruncationTests(unittest.TestCase):
         self.assertEqual(env2.adapter.total_evaluations, 1)  # no additional call made
 
 
+class CollectRolloutBudgetStopTests(unittest.TestCase):
+    """collect_rollout must not start a new episode once the env's budget
+    is exhausted (Required change 4's efficiency half -- the env itself
+    already guarantees no further simulator call is ever attempted).
+    """
+
+    def test_collect_rollout_stops_early_when_budget_exhausted_mid_collection(self):
+        from rl.trainer import collect_rollout
+        from rl.ppo_agent import PPOAgent
+        from rl.autockt_state import STATE_DIM
+
+        grids = build_parameter_grids()
+        indices = verified_initial_indices(grids)
+        target_pool = (TargetSpec.from_existing_thresholds(),)
+        adapter = ReceiverRLAdapter(
+            evaluator=lambda *a, **k: _fake_evaluation(False, failure_stage="dc"), budget=RLBudget(2), seed=0,
+        )
+        env = AutoCktReceiverEnv(
+            target_pool=target_pool, initial_indices=indices, horizon=1,
+            adapter=adapter, grids=grids, seed=0,
+        )
+        agent = PPOAgent(state_dim=STATE_DIM, num_heads=len(PARAMETER_NAMES), seed=0)
+
+        # Budget=2, horizon=1 -- asking for 10 episodes should still only
+        # ever collect 2 real evaluations (one per episode) and then stop,
+        # not raise and not spend a 3rd evaluation.
+        transitions, _, episode_logs = collect_rollout(env, agent, episodes=10)
+        self.assertEqual(adapter.total_evaluations, 2)
+        self.assertEqual(len(episode_logs), 2)
+        self.assertEqual(len(transitions), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

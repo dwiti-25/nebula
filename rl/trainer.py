@@ -66,6 +66,14 @@ def collect_rollout(
 
     for offset in range(episodes):
         episode_index = episode_index_start + offset
+        if env.budget_exhausted():
+            # [NEBULA ADAPTATION -- Required change 4] the env's own
+            # step()/reset() already refuse to make a further simulator
+            # call once the budget is exhausted (see rl/autockt_env.py),
+            # so this is a pure efficiency stop, not a correctness fix --
+            # avoids collecting further reset+truncated-step cycles that
+            # can never make real progress once no evaluations remain.
+            break
         state, reset_info = env.reset()
         episode_log = EpisodeLog(episode_index=episode_index, target=reset_info["target"])
         done = False
