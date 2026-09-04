@@ -104,6 +104,42 @@ PVT_CONDITION_SETS: dict[str, Optional[tuple[SimulationConditions, ...]]] = {
     "minimal27": pvt_sweep.MINIMAL_27_CONDITIONS,
 }
 
+# Runtime diagnosis (docs/autockt-mapping.md sec 24 / RUNTIME investigation):
+# select_final_design's own fidelity default (EvaluationFidelity.FINAL) was
+# being silently inherited by EVERY non-"none" PVT set, including "smoke" --
+# whose whole design intent (see the --pvt-condition-set help text below) is
+# to be the CHEAP, small-condition-count option. A direct diagnostic (one
+# known-good candidate, both smoke conditions, real ngspice) measured
+# ~281-290s per condition at FINAL fidelity, ~571s combined for just ONE
+# candidate -- legitimate, successful computation (no hang, no crash, no
+# convergence failure) that nonetheless looks indistinguishable from a hung
+# UI run, since nothing surfaces stage-level progress.
+#
+# CANDIDATE fidelity runs the IDENTICAL stage set as FINAL (verified by
+# reading simulator/receiver.py directly: dc/ac/ctle_transient/channel_
+# diagnostics/noise/hd3/transient are all gated at <=CANDIDATE) -- FINAL
+# only adds a 3-amplitude HD3 characterization sweep (characterize=True)
+# instead of CANDIDATE's single amplitude, which changes HD3 METRIC VALUES
+# only. analysis.pvt_selection.run_pvt_evaluation reads only
+# evaluation.success/failed_stage (never .metrics) to build PVTPointResult,
+# and select_with_trade_off_preference's tie-break reads the candidate's
+# already-computed NOMINAL metrics (from generate_candidates), never
+# anything produced by the PVT sweep itself -- so PVT feasibility and
+# "most robust"/trade-off selection use zero information FINAL adds over
+# CANDIDATE. CANDIDATE is fidelity-sufficient for this consumer, and roughly
+# halves the HD3 stage's contribution (~70-86s -> ~23-29s per condition,
+# confirmed by direct measurement of both fidelities on the same candidate).
+#
+# "minimal27" (the actual robustness proof) deliberately keeps FINAL --
+# only "smoke" (explicitly a cheap pre-check, never itself a robustness
+# claim) is downgraded. Explicit per-named-set mapping, not a change to
+# select_final_design's own default (still FINAL for any caller that
+# doesn't pass pvt_fidelity, e.g. existing tests/other call sites).
+PVT_CONDITION_SET_FIDELITY: dict[str, EvaluationFidelity] = {
+    "smoke": EvaluationFidelity.CANDIDATE,
+    "minimal27": EvaluationFidelity.FINAL,
+}
+
 
 # ---------------------------------------------------------------------------
 # Stage 1: target validation
@@ -378,6 +414,7 @@ def run_pipeline(
     randomize_initial_state: bool = True,
     initial_indices_source: str = "verified",
     pvt_conditions: Optional[tuple] = None,
+    pvt_fidelity: Optional[EvaluationFidelity] = None,
     trade_off_preference: str = "most_robust",
     measure_hd3_noise_flag: bool = False,
     export_schematic_to: Optional[Path] = None,
@@ -393,7 +430,8 @@ def run_pipeline(
     )
     feasible = filter_nominal_feasible(candidates)
     selection = select_final_design(
-        feasible, pvt_conditions=pvt_conditions, trade_off_preference=trade_off_preference,
+        feasible, pvt_conditions=pvt_conditions, pvt_fidelity=pvt_fidelity,
+        trade_off_preference=trade_off_preference,
     )
 
     result: dict[str, Any] = {
@@ -472,8 +510,11 @@ def _main() -> int:
                          help="'none' (default, unchanged behavior): NOMINAL-ONLY selection -- the selected design "
                               "is NOT validated across process/voltage/temperature, only at nominal TT/1.8V/27C; "
                               "do not read a 'none' run as PVT-robust. 'smoke': 2 conditions (nominal TT + one "
-                              "stress corner) -- exercises the PVT-aware selection pathway with real SPICE, still "
-                              "NOT a robustness proof. 'minimal27': the full 27-point TT/SS/FF x VDD+/-5% x "
+                              "stress corner), evaluated at EvaluationFidelity.CANDIDATE (not FINAL -- CANDIDATE "
+                              "runs the identical stage set and is sufficient for pass/fail feasibility and "
+                              "trade-off selection, see PVT_CONDITION_SET_FIDELITY's comment) -- exercises the "
+                              "PVT-aware selection pathway with real SPICE, still NOT a robustness proof. "
+                              "'minimal27': the full 27-point TT/SS/FF x VDD+/-5% x "
                               "0-125C robustness sweep (experiments/pvt_sweep.py's own MINIMAL_27_CONDITIONS) -- "
                               "the only choice that constitutes an actual PVT robustness result; SLOW "
                               "(~121.8 min historically for one design, docs/autockt-mapping.md sec 22) and never "
@@ -511,6 +552,7 @@ def _main() -> int:
         randomize_initial_state=args.randomize_initial_state,
         initial_indices_source=args.initial_indices_source,
         pvt_conditions=PVT_CONDITION_SETS[args.pvt_condition_set],
+        pvt_fidelity=PVT_CONDITION_SET_FIDELITY.get(args.pvt_condition_set),
         trade_off_preference=args.trade_off_preference,
         measure_hd3_noise_flag=args.measure_hd3_noise,
         export_schematic_to=args.export_schematic,

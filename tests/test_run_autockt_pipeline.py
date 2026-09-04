@@ -17,6 +17,7 @@ from unittest.mock import patch
 from rl.target_spec import TargetSpec
 
 from experiments.run_autockt_pipeline import (
+    PVT_CONDITION_SET_FIDELITY,
     PVT_CONDITION_SETS,
     PipelineCandidate,
     _main,
@@ -374,6 +375,35 @@ class PvtConditionSetsAuditTests(unittest.TestCase):
             result = json.loads(output.read_text(encoding="utf-8"))
         self.assertIsNone(result["selection"]["pvt"])
 
+    def test_smoke_maps_to_candidate_fidelity_not_final(self):
+        # RUNTIME diagnosis: select_final_design's own default (FINAL) was
+        # being silently inherited by "smoke", making a "small" 2-condition
+        # set cost ~571s (measured) for one candidate. CANDIDATE runs the
+        # identical stage set (verified against simulator/receiver.py) and
+        # is sufficient for PVT pass/fail + trade-off selection, since
+        # analysis.pvt_selection never reads evaluation.metrics.
+        from simulator.receiver import EvaluationFidelity
+        self.assertEqual(PVT_CONDITION_SET_FIDELITY["smoke"], EvaluationFidelity.CANDIDATE)
+
+    def test_minimal27_still_maps_to_final_fidelity_unchanged(self):
+        # The actual robustness proof must not be weakened.
+        from simulator.receiver import EvaluationFidelity
+        self.assertEqual(PVT_CONDITION_SET_FIDELITY["minimal27"], EvaluationFidelity.FINAL)
+
+    def test_none_never_reaches_pvt_evaluation_so_has_no_fidelity_to_choose(self):
+        # "none" skips select_final_design's PVT branch entirely (pvt_conditions
+        # is None) -- there is no fidelity decision to make for it, and it must
+        # not silently gain one.
+        self.assertNotIn("none", PVT_CONDITION_SET_FIDELITY)
+
+    def test_smoke_condition_definitions_are_exactly_unchanged(self):
+        # Locks down the two smoke corners themselves -- only the FIDELITY
+        # used to evaluate them may change, never the corner/temp/vdd values.
+        from simulator.config import ProcessCorner, SimulationConditions
+        nominal, stress = PVT_CONDITION_SETS["smoke"]
+        self.assertEqual(nominal, SimulationConditions(ProcessCorner.TT, 27.0, 1.8))
+        self.assertEqual(stress, SimulationConditions(ProcessCorner.FF, 125.0, 1.71))
+
 
 class CLIIntegrationTests(unittest.TestCase):
     def test_full_synthetic_dry_run_produces_a_structured_result_with_schematic_and_spec(self):
@@ -445,6 +475,73 @@ class CLIIntegrationTests(unittest.TestCase):
                 pvt_row = next(r for r in result["final_specification"]["rows"]
                                 if r["metric"] == "PVT (pass/total)")
                 self.assertEqual(pvt_row["measured"], "2/2")
+
+    def test_smoke_end_to_end_reaches_evaluate_pvt_grid_at_candidate_fidelity(self):
+        # Proves the wiring, not just the static PVT_CONDITION_SET_FIDELITY
+        # dict: --pvt-condition-set smoke must cause the REAL call into
+        # analysis.pvt_selection.evaluate_pvt_grid to receive
+        # EvaluationFidelity.CANDIDATE, and PVT selection must still produce
+        # a normal pass/fail result using only the metrics CANDIDATE
+        # fidelity provides (this fake evaluator returns no metrics at all,
+        # matching that run_pvt_evaluation never reads evaluation.metrics).
+        from simulator.receiver import EvaluationFidelity, ReceiverEvaluation
+
+        seen_fidelities = []
+
+        def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity):
+            seen_fidelities.append(fidelity)
+            return tuple(
+                ReceiverEvaluation(True, parameters, c, fidelity, (), {}, None, 0.0, "id", {})
+                for c in conditions
+            )
+
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "result.json"
+            argv = [
+                "run_autockt_pipeline.py", "--target-mode", "trivial", "--backend", "synthetic",
+                "--episodes", "8", "--horizon", "1", "--initial-indices-source", "grid-center",
+                "--agent-seed", "1", "--eval-seed", "1", "--pvt-condition-set", "smoke",
+                "--output", str(output),
+            ]
+            with patch("analysis.pvt_selection.evaluate_pvt_grid", side_effect=fake_evaluate_pvt_grid):
+                with patch("sys.argv", argv):
+                    _main()
+
+            result = json.loads(output.read_text(encoding="utf-8"))
+            if result["selection"]["selected"] is not None:
+                self.assertTrue(seen_fidelities, "expected evaluate_pvt_grid to be called at least once")
+                self.assertTrue(all(f == EvaluationFidelity.CANDIDATE for f in seen_fidelities))
+                self.assertEqual(result["selection"]["pvt"]["pass_rate"], 1.0)
+                self.assertTrue(result["selection"]["pvt"]["met_minimum_pass_rate"])
+
+    def test_minimal27_end_to_end_still_reaches_evaluate_pvt_grid_at_final_fidelity(self):
+        from simulator.receiver import EvaluationFidelity, ReceiverEvaluation
+
+        seen_fidelities = []
+
+        def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity):
+            seen_fidelities.append(fidelity)
+            return tuple(
+                ReceiverEvaluation(True, parameters, c, fidelity, (), {}, None, 0.0, "id", {})
+                for c in conditions
+            )
+
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "result.json"
+            argv = [
+                "run_autockt_pipeline.py", "--target-mode", "trivial", "--backend", "synthetic",
+                "--episodes", "8", "--horizon", "1", "--initial-indices-source", "grid-center",
+                "--agent-seed", "1", "--eval-seed", "1", "--pvt-condition-set", "minimal27",
+                "--output", str(output),
+            ]
+            with patch("analysis.pvt_selection.evaluate_pvt_grid", side_effect=fake_evaluate_pvt_grid):
+                with patch("sys.argv", argv):
+                    _main()
+
+            result = json.loads(output.read_text(encoding="utf-8"))
+            if result["selection"]["selected"] is not None:
+                self.assertTrue(seen_fidelities, "expected evaluate_pvt_grid to be called at least once")
+                self.assertTrue(all(f == EvaluationFidelity.FINAL for f in seen_fidelities))
 
     def test_target_json_flag_builds_an_arbitrary_target(self):
         import json as _json
