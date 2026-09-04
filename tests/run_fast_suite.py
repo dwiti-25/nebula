@@ -39,6 +39,7 @@ SPICE_FREE_MODULES = [
     "tests.test_rl_events",
     "tests.test_rl_ppo_v2_ablation",
     "tests.test_evaluation_cache",
+    "tests.test_rl_runtime_efficiency_study",
 ]
 
 
