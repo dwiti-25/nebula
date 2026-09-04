@@ -170,3 +170,61 @@ def synthetic_evaluate_receiver(
         True, parameters, conditions, fidelity, (stage,), metrics,
         None, 0.0, evaluation_id, {}, False,
     )
+
+
+# [NEBULA ADAPTATION -- PPO model-improvement study, "Synthetic RL
+# ablations," in-scope] a second, additive synthetic evaluator alongside
+# synthetic_evaluate_receiver (unchanged, byte-for-byte, above): adds a
+# THIRD region -- reached transient, real (possibly poor) metrics
+# computed, but a hard gate failed (failure_stage="transient", the same
+# label the real simulator uses) -- between the "good" and "no
+# information at all" regions. The original function only ever produces a
+# binary good/no-information outcome, which cannot exercise reward_v2's
+# graded-vs-no-information distinction (Required change 3) at all. Not a
+# claim about circuit behavior, same as the module docstring above.
+SYNTHETIC_TRANSIENT_REACHED_DISTANCE = 1.05  # > SYNTHETIC_FAILURE_DISTANCE (0.9)
+
+
+def synthetic_evaluate_receiver_graded(
+    parameters: ReceiverParameters,
+    conditions: SimulationConditions = SimulationConditions(),
+    fidelity: EvaluationFidelity = EvaluationFidelity.TRAINING,
+    **_kwargs: Mapping[str, object],
+) -> ReceiverEvaluation:
+    """Same landscape as synthetic_evaluate_receiver, with one addition:
+    the distance band (SYNTHETIC_FAILURE_DISTANCE, SYNTHETIC_TRANSIENT_REACHED_DISTANCE]
+    reports success=False, failure_stage="transient" (matching the real
+    simulator's own label so reward_v2/graded_autockt_reward's existing
+    transient-stage gating activates unmodified), WITH real (lerp'd, just
+    not good enough) metrics attached -- unlike the pure no-information
+    region beyond it.
+    """
+
+    position = _normalized_position(parameters)
+    distance = _distance_from_center(position)
+    evaluation_id = "synthetic-graded:" + ",".join(f"{p:.6f}" for p in position)
+    goodness = max(0.0, 1.0 - distance)
+    metrics = {
+        "dfe_locked_phase_eye_height_v": _lerp(_HEIGHT_RANGE, goodness),
+        "dfe_eye_width_ui": _lerp(_WIDTH_RANGE, goodness),
+        "dfe_min_margin_v": _lerp(_MARGIN_RANGE, goodness),
+        "ctle_power_w": _lerp(_POWER_RANGE, goodness),
+    }
+
+    if distance > SYNTHETIC_TRANSIENT_REACHED_DISTANCE:
+        stage = StageResult(SYNTHETIC_FAILURE_STAGE, False, 0.0, metrics={})
+        return ReceiverEvaluation(
+            False, parameters, conditions, fidelity, (stage,), {},
+            SYNTHETIC_FAILURE_STAGE, 0.0, evaluation_id, {}, False,
+        )
+    if distance > SYNTHETIC_FAILURE_DISTANCE:
+        stage = StageResult("transient", False, 0.0, metrics=metrics)
+        return ReceiverEvaluation(
+            False, parameters, conditions, fidelity, (stage,), metrics,
+            "transient", 0.0, evaluation_id, {}, False,
+        )
+    stage = StageResult("synthetic", True, 0.0, metrics=metrics)
+    return ReceiverEvaluation(
+        True, parameters, conditions, fidelity, (stage,), metrics,
+        None, 0.0, evaluation_id, {}, False,
+    )

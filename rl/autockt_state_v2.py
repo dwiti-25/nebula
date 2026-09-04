@@ -41,6 +41,11 @@ STATE_SCHEMA_VERSION = 2
 # exists -- append-only if a new stage name is ever added.
 FAILURE_STAGE_VOCAB: tuple[Optional[str], ...] = (
     None, "unevaluated", "setup", "dc", "ac", "ctle_transient", "channel", "transient", "noise", "hd3", "internal",
+    # rl/synthetic_benchmark.py::SYNTHETIC_FAILURE_STAGE -- the synthetic,
+    # SPICE-free RL-mechanics benchmark's own out-of-region failure label
+    # (never produced by the real simulator; included so synthetic ablations
+    # can use this state schema without a vocabulary error).
+    "synthetic_out_of_region",
 )
 
 # Metrics that ARE genuinely available before the transient stage (the one
