@@ -111,6 +111,17 @@ class BuildReportTests(unittest.TestCase):
         self.assertFalse(rs["wall_clock_available"])
         self.assertIsNone(rs["wall_clock_total_s"])
 
+    def test_strict_rate_distinguishes_recomputed_and_logged_evidence(self):
+        if not _fixtures_present():
+            self.skipTest("fixtures not present")
+        methods = build_benchmark_report()["trials"]["no_warm_start_headtohead_sec20"]["methods"]
+        self.assertEqual(methods["random_search"]["strict_success_evidence_grade"], "raw_metrics_recomputed")
+        self.assertEqual(
+            methods["ppo"]["strict_success_evidence_grade"],
+            "logged_same_target_outcome_raw_metrics_unavailable",
+        )
+        self.assertEqual(methods["ppo"]["reported_strict_success_rate"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

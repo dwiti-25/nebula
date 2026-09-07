@@ -602,3 +602,24 @@ module they depend on) plus their tests.
 
 See `docs/FINAL_TECHNICAL_AUDIT.md` for the full narrative interpretation
 of these results (what can and cannot be honestly claimed from them).
+
+## Phase 7 — target-correct qualification and evidence dashboard
+
+The local UI now includes seven source-traceable performance graphs and can
+read both historical evidence and the trained PPO checkpoint directly from
+the tracked Phase-2 ZIP on a clean checkout. Candidate filtering and PVT
+selection use strict, independent per-metric target checks and fail closed;
+AutoCkt's intentionally tolerant terminal reward is retained for learning but
+is no longer treated as an engineering qualification predicate.
+
+Run the UI with:
+
+```text
+python experiments/web_ui.py --port 8001
+```
+
+See [`docs/PHASE7_COMPLETION_REPORT.md`](docs/PHASE7_COMPLETION_REPORT.md)
+for the preserved implementation order, performance-display semantics,
+reviewed Stage-2 deferrals, and remaining qualification work. The
+research-backed Matplotlib migration and performance-plot roadmap is in
+[`docs/PERFORMANCE_PLOT_IMPLEMENTATION_PLAN.md`](docs/PERFORMANCE_PLOT_IMPLEMENTATION_PLAN.md).

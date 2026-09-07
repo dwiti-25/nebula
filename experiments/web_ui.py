@@ -46,7 +46,16 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+# When this file is launched directly (``python experiments/web_ui.py``),
+# Python places ``experiments/`` rather than the repository root on
+# sys.path. Add the root before importing sibling top-level packages.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from analysis.performance_dashboard import build_dashboard
+from analysis.artifact_store import packaged_file_exists
+
 RUNS_DIR = PROJECT_ROOT / "results" / "web_ui_runs"
 HOST = "127.0.0.1"  # localhost-only default -- pass --host to expose beyond this machine
 DEFAULT_PORT = 8000
@@ -60,7 +69,9 @@ TAIL_CHARS = 4000  # stdout/stderr tail kept per run, to bound memory/response s
 # for one design's 27-point sweep, docs/autockt-mapping.md sec 22, times
 # however many nominally-feasible candidates reach that stage) while
 # still catching a genuine hang rather than waiting forever.
-RUN_TIMEOUT_S = 7200.0  # 2 hours
+RUN_TIMEOUT_S = 7200.0  # legacy/default bound for non-full-PVT work
+MINIMAL27_FIXED_OVERHEAD_S = 1800.0
+MINIMAL27_PER_CANDIDATE_S = 3.0 * 3600.0
 
 _RUNS: dict[str, dict[str, Any]] = {}
 _RUNS_LOCK = threading.Lock()
@@ -119,7 +130,10 @@ def _validate_request(payload: dict[str, Any]) -> list[str]:
     checkpoint = payload.get("checkpoint")
     if checkpoint:
         checkpoint_path = (PROJECT_ROOT / checkpoint).resolve()
-        if PROJECT_ROOT not in checkpoint_path.parents or not checkpoint_path.is_file():
+        inside_project = PROJECT_ROOT in checkpoint_path.parents
+        if not inside_project or not (
+            checkpoint_path.is_file() or packaged_file_exists(PROJECT_ROOT, checkpoint)
+        ):
             problems.append(f"checkpoint not found inside the project: {checkpoint}")
     if payload.get("pvt_condition_set") not in PVT_CONDITION_SETS:
         problems.append(f"pvt_condition_set must be one of {PVT_CONDITION_SETS}")
@@ -151,7 +165,26 @@ def _build_argv(payload: dict[str, Any], *, output_path: Path, schematic_path: P
     return argv
 
 
-def _execute_run(run_id: str, argv: list[str], output_path: Path, schematic_path: Path) -> None:
+def _estimate_timeout_s(payload: dict[str, Any]) -> float:
+    """Return a configuration-aware watchdog bound.
+
+    Full PVT is run for every nominally-feasible episode candidate, not just
+    one design. The old fixed two-hour bound was shorter than a measured
+    27-corner sweep and could kill healthy work. Three hours per possible
+    candidate plus setup overhead is deliberately conservative; this remains
+    a hang guard, not a prediction of normal runtime.
+    """
+
+    if payload.get("pvt_condition_set") != "minimal27":
+        return RUN_TIMEOUT_S
+    episodes = max(1, int(payload.get("episodes", 1)))
+    return MINIMAL27_FIXED_OVERHEAD_S + episodes * MINIMAL27_PER_CANDIDATE_S
+
+
+def _execute_run(
+    run_id: str, argv: list[str], output_path: Path, schematic_path: Path,
+    timeout_s: float = RUN_TIMEOUT_S,
+) -> None:
     with _RUNS_LOCK:
         _RUNS[run_id]["status"] = "running"
         _RUNS[run_id]["started_at"] = time.monotonic()
@@ -162,7 +195,7 @@ def _execute_run(run_id: str, argv: list[str], output_path: Path, schematic_path
             argv, cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         try:
-            stdout, stderr = proc.communicate(timeout=RUN_TIMEOUT_S)
+            stdout, stderr = proc.communicate(timeout=timeout_s)
             returncode = proc.returncode
         except subprocess.TimeoutExpired:
             timed_out = True
@@ -189,7 +222,7 @@ def _execute_run(run_id: str, argv: list[str], output_path: Path, schematic_path
         elif timed_out:
             entry["status"] = "failed"
             entry["error"] = (
-                f"the pipeline subprocess did not finish within {RUN_TIMEOUT_S / 60:.0f} minutes and was "
+                f"the pipeline subprocess did not finish within {timeout_s / 60:.0f} minutes and was "
                 "killed (not a crash -- a hang, e.g. a wedged ngspice process). This was NOT retried "
                 "automatically. If this is unexpected for the configuration you ran, investigate before retrying."
             )
@@ -221,16 +254,20 @@ def _start_run(payload: dict[str, Any]) -> str:
     output_path = RUNS_DIR / f"{run_id}.json"
     schematic_path = RUNS_DIR / f"{run_id}_schematic.spice"
     argv = _build_argv(payload, output_path=output_path, schematic_path=schematic_path)
+    timeout_s = _estimate_timeout_s(payload)
 
     with _RUNS_LOCK:
         _RUNS[run_id] = {
             "run_id": run_id, "status": "queued", "command": argv,
             "output_path": str(output_path), "schematic_path": str(schematic_path),
             "started_at": None, "finished_at": None, "returncode": None,
+            "timeout_s": timeout_s,
             "error": None, "result": None, "stdout_tail": "", "stderr_tail": "",
         }
 
-    thread = threading.Thread(target=_execute_run, args=(run_id, argv, output_path, schematic_path), daemon=True)
+    thread = threading.Thread(
+        target=_execute_run, args=(run_id, argv, output_path, schematic_path, timeout_s), daemon=True,
+    )
     thread.start()
     return run_id
 
@@ -253,6 +290,7 @@ def _status_payload(run_id: str) -> Optional[dict[str, Any]]:
         "run_id": entry["run_id"], "status": entry["status"], "elapsed_s": round(elapsed_s, 1),
         "command": " ".join(entry["command"]), "returncode": entry["returncode"], "error": entry["error"],
         "stdout_tail": entry["stdout_tail"], "stderr_tail": entry["stderr_tail"], "result": entry["result"],
+        "timeout_s": entry.get("timeout_s", RUN_TIMEOUT_S),
     }
     if entry["result"] is not None and entry["result"].get("schematic_path"):
         payload["schematic_path"] = entry["result"]["schematic_path"]
@@ -261,11 +299,13 @@ def _status_payload(run_id: str) -> Optional[dict[str, Any]]:
 
 def _available_checkpoints() -> list[str]:
     results_dir = PROJECT_ROOT / "results"
-    if not results_dir.is_dir():
-        return []
-    return sorted(
+    checkpoints = set(
         str(p.relative_to(PROJECT_ROOT)) for p in results_dir.glob("*.pt")
-    )
+    ) if results_dir.is_dir() else set()
+    packaged_checkpoint = "results/autockt_mixed_target_confirmation_policy.pt"
+    if packaged_file_exists(PROJECT_ROOT, packaged_checkpoint):
+        checkpoints.add(packaged_checkpoint)
+    return sorted(checkpoints)
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +340,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(200, INDEX_HTML)
         elif path == "/api/checkpoints":
             self._send_json(200, {"checkpoints": _available_checkpoints()})
+        elif path == "/api/evidence":
+            self._send_json(200, build_dashboard(PROJECT_ROOT))
         elif path.startswith("/api/status/"):
             run_id = path[len("/api/status/"):]
             if not _RUN_ID_RE.match(run_id):
@@ -403,6 +445,13 @@ INDEX_HTML = r"""<!doctype html>
   .links a { color: var(--accent); text-decoration: none; font-size: 13px; margin-right: 16px; }
   .links a:hover { text-decoration: underline; }
   .hint { color: var(--muted); font-size: 11.5px; margin-top: 4px; }
+  .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+  .chart { background:#0d1117; border:1px solid var(--border); border-radius:8px; padding:10px; min-height:245px; }
+  .chart h3 { font-size:12px; margin:0 0 6px; color:var(--text); }
+  .chart svg { width:100%; height:180px; overflow:visible; }
+  .chart-note { color:var(--muted); font-size:10.5px; margin-top:5px; }
+  .axis-label { fill:var(--muted); font-size:9px; }
+  .evidence-meta { color:var(--muted); font-size:11px; margin-top:10px; }
   code { color: var(--accent); }
 </style>
 </head>
@@ -492,6 +541,12 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <div class="panel">
+    <div class="card" id="evidenceCard">
+      <h2>Measured performance evidence</h2>
+      <div id="evidenceSummary" class="param-grid"></div>
+      <div id="chartGrid" class="chart-grid" style="margin-top:14px"></div>
+      <div id="evidenceMeta" class="evidence-meta">Loading archived evidence…</div>
+    </div>
     <div id="resultsEmpty">Configure a target and click <strong>Run NEBULA</strong> to see results here.</div>
     <div id="errorBox" class="error-box" style="display:none"></div>
     <div id="results" style="display:none">
@@ -544,6 +599,74 @@ fetch('/api/checkpoints').then(r => r.json()).then(data => {
   }
   if (data.checkpoints.length) sel.value = data.checkpoints[0];
 });
+
+function svgFrame(title) {
+  const box = document.createElement('div'); box.className = 'chart';
+  const h = document.createElement('h3'); h.textContent = title; box.appendChild(h);
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 320 180'); box.appendChild(svg);
+  return [box, svg];
+}
+
+function addSvg(svg, tag, attrs, text='') {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k,v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (text) el.textContent = text; svg.appendChild(el); return el;
+}
+
+function renderChart(chart) {
+  const [box, svg] = svgFrame(chart.title);
+  const left=38, top=10, width=266, height=138;
+  addSvg(svg,'line',{x1:left,y1:top,x2:left,y2:top+height,stroke:'#53606d'});
+  addSvg(svg,'line',{x1:left,y1:top+height,x2:left+width,y2:top+height,stroke:'#53606d'});
+  if (chart.type === 'line') {
+    const values = chart.series[0].values.map(Number);
+    const min = Math.min(0,...values), max = Math.max(1,...values), span = max-min || 1;
+    const pts = values.map((v,i) => `${left+(i/Math.max(1,values.length-1))*width},${top+height-(v-min)/span*height}`).join(' ');
+    addSvg(svg,'polyline',{points:pts,fill:'none',stroke:'#4fd1c5','stroke-width':'2'});
+    addSvg(svg,'text',{x:2,y:top+8,class:'axis-label'},max.toFixed(2));
+    addSvg(svg,'text',{x:2,y:top+height,class:'axis-label'},min.toFixed(2));
+  } else if (chart.type === 'bar') {
+    const values = chart.values.map(v => Number(v || 0)); const max = Math.max(1,...values);
+    const slot = width/Math.max(1,values.length);
+    values.forEach((v,i) => {
+      const h=v/max*height, x=left+i*slot+5;
+      addSvg(svg,'rect',{x,y:top+height-h,width:Math.max(5,slot-10),height:h,fill:'#4fd1c5'});
+      addSvg(svg,'text',{x:x+(slot-10)/2,y:top+height+12,'text-anchor':'middle',class:'axis-label'},String(chart.categories[i]).slice(0,12));
+      addSvg(svg,'text',{x:x+(slot-10)/2,y:top+height-h-3,'text-anchor':'middle',class:'axis-label'},v.toFixed(v<1?2:0));
+    });
+  } else if (chart.type === 'scatter') {
+    const xs=chart.points.map(p=>p.x), ys=chart.points.map(p=>p.y);
+    const xmin=Math.min(...xs), xmax=Math.max(...xs), ymin=Math.min(...ys), ymax=Math.max(...ys);
+    chart.points.forEach(p => {
+      const x=left+(p.x-xmin)/(xmax-xmin||1)*width, y=top+height-(p.y-ymin)/(ymax-ymin||1)*height;
+      const dot=addSvg(svg,'circle',{cx:x,cy:y,r:4,fill:'#4fd1c5'}); dot.appendChild(document.createElementNS('http://www.w3.org/2000/svg','title')).textContent=p.label;
+    });
+  } else if (chart.type === 'heatmap') {
+    const cols=chart.columns.length, rows=chart.rows.length, cw=width/cols, rh=height/rows;
+    chart.cells.forEach(cell => {
+      const ci=chart.conditions.findIndex(c=>Number(c[0])===cell.supply_v && Number(c[1])===cell.temperature_c);
+      const ri=chart.rows.indexOf(cell.process); if (ci<0 || ri<0) return;
+      const rect=addSvg(svg,'rect',{x:left+ci*cw,y:top+ri*rh,width:cw-1,height:rh-1,fill:cell.passed?'#3fb950':'#f85149'});
+      rect.appendChild(document.createElementNS('http://www.w3.org/2000/svg','title')).textContent=`${cell.process} ${cell.supply_v}V ${cell.temperature_c}C`;
+    });
+  }
+  addSvg(svg,'text',{x:left+width/2,y:176,'text-anchor':'middle',class:'axis-label'},chart.x_label || 'condition');
+  if (chart.note) { const note=document.createElement('div'); note.className='chart-note'; note.textContent=chart.note; box.appendChild(note); }
+  return box;
+}
+
+fetch('/api/evidence').then(r=>r.json()).then(data => {
+  const s=data.summary;
+  $('evidenceSummary').innerHTML =
+    `<div><div class="k">PPO evaluations</div><div class="v">${s.ppo_evaluations}</div></div>`+
+    `<div><div class="k">Logged target successes</div><div class="v">${s.ppo_logged_successes}</div></div>`+
+    `<div><div class="k">Full PVT</div><div class="v">${s.pvt_passes}/${s.pvt_total}</div></div>`+
+    `<div><div class="k">Feasible designs</div><div class="v">${s.feasible_designs}</div></div>`;
+  for (const chart of data.charts) $('chartGrid').appendChild(renderChart(chart));
+  $('evidenceMeta').textContent = `${data.charts.length} graphs from ${data.sources.length} archived sources. `+
+    data.limitations.join(' ');
+}).catch(err => { $('evidenceMeta').textContent='Evidence could not be loaded: '+err; });
 
 function setBadge(status) {
   const badge = $('statusBadge');

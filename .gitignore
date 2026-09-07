@@ -7,6 +7,7 @@
 results/*.jsonl
 results/*.jsonl.*.json
 results/*.csv
+results/web_ui_runs/
 generated/
 .nebula-cache/
 

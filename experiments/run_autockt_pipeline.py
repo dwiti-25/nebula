@@ -47,6 +47,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 import argparse
+import io
 import json
 import math
 from dataclasses import asdict, dataclass
@@ -54,6 +55,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import torch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 from simulator.config import ProcessCorner, SimulationConditions
 from simulator.receiver import EvaluationFidelity, ReceiverParameters, evaluate_receiver
@@ -71,7 +74,9 @@ from experiments.export_final_schematic import render_final_schematic
 from experiments.train_autockt import _resolve_initial_indices
 
 from analysis.design_catalog import FeasibleDesign, rank_by_measured_trade_offs
+from analysis.artifact_store import read_packaged_bytes
 from analysis.final_specification import build_final_specification_report, format_report
+from analysis.target_assessment import assess_target
 from analysis.pvt_selection import (
     PVTPointResult,
     PVTRobustnessResult,
@@ -138,6 +143,20 @@ class PipelineCandidate:
     reward: float
     spec_satisfied: bool
     steps: int
+    evaluation_success: bool = True
+
+
+def _load_checkpoint_state(checkpoint_path: Path) -> dict[str, Any]:
+    """Load a policy state from a loose file or the immutable artifact ZIP."""
+
+    if checkpoint_path.is_file():
+        checkpoint_source: Any = checkpoint_path
+    else:
+        packaged = read_packaged_bytes(PROJECT_ROOT, checkpoint_path)
+        if packaged is None:
+            raise FileNotFoundError(f"checkpoint not found on disk or in artifact package: {checkpoint_path}")
+        checkpoint_source = io.BytesIO(packaged)
+    return torch.load(checkpoint_source, weights_only=True)
 
 
 def generate_candidates(
@@ -180,7 +199,7 @@ def generate_candidates(
     )
     agent = PPOAgent(state_dim=STATE_DIM, num_heads=len(PARAMETER_NAMES), seed=agent_seed)
     if checkpoint_path is not None:
-        agent.policy.load_state_dict(torch.load(checkpoint_path, weights_only=True))
+        agent.policy.load_state_dict(_load_checkpoint_state(checkpoint_path))
 
     candidates: list[PipelineCandidate] = []
     for episode in range(episodes):
@@ -190,6 +209,7 @@ def generate_candidates(
         steps = 0
         last_parameters: Optional[dict[str, float]] = None
         last_metrics: Optional[dict[str, float]] = None
+        last_success = False
         while not done and not truncated:
             choices, _log_prob, _value = agent.act(state, deterministic=True)
             step_out = env.step(choices)
@@ -199,9 +219,11 @@ def generate_candidates(
             steps += 1
             last_parameters = step_out.info["parameters"]
             last_metrics = step_out.info["metrics"]
+            last_success = bool(step_out.info["success"])
         candidates.append(PipelineCandidate(
             episode=episode, parameters=last_parameters or {}, metrics=last_metrics or {},
             reward=episode_reward, spec_satisfied=done, steps=steps,
+            evaluation_success=last_success,
         ))
     return candidates
 
@@ -210,13 +232,19 @@ def generate_candidates(
 # Stage 4: nominal feasibility filter
 # ---------------------------------------------------------------------------
 
-def filter_nominal_feasible(candidates: list[PipelineCandidate]) -> list[PipelineCandidate]:
-    """`spec_satisfied` was already computed inside AutoCktReceiverEnv.step()
-    via the existing, unmodified autockt_reward -- this filters on that
-    result directly rather than recomputing the check.
-    """
+def filter_nominal_feasible(
+    candidates: list[PipelineCandidate], target: Optional[TargetSpec] = None,
+) -> list[PipelineCandidate]:
+    """Filter using strict per-metric target satisfaction, not reward tolerance."""
 
-    return [c for c in candidates if c.spec_satisfied]
+    effective_target = target or TargetSpec.from_existing_thresholds()
+    return [
+        candidate for candidate in candidates
+        if assess_target(
+            candidate.metrics, effective_target,
+            simulator_success=candidate.evaluation_success,
+        ).passed
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +269,7 @@ def select_final_design(
     pvt_fidelity=None,
     minimum_pass_rate: float = 1.0,
     trade_off_preference: str = "most_robust",
+    target: Optional[TargetSpec] = None,
 ) -> dict[str, Any]:
     """Priority, deterministic and documented (not an arbitrary weighted
     score): (1) nominal feasibility -- already guaranteed by only receiving
@@ -272,11 +301,25 @@ def select_final_design(
 
     fidelity = pvt_fidelity or EvaluationFidelity.FINAL
     pvt_results: list[PVTRobustnessResult] = [
-        run_pvt_evaluation(d, pvt_conditions, fidelity=fidelity) for d in designs
+        run_pvt_evaluation(d, pvt_conditions, fidelity=fidelity, target=target) for d in designs
     ]
     top = select_with_trade_off_preference(
         pvt_results, designs, preference=trade_off_preference, minimum_pass_rate=minimum_pass_rate,
     )
+    if top is None:
+        best_available = sorted(pvt_results, key=lambda result: (-result.pass_rate, -result.n_conditions))[0]
+        return {
+            "selected": None,
+            "reason": f"no candidate met minimum PVT pass rate {minimum_pass_rate:.1%}",
+            "best_available": {
+                "design_id": best_available.design_id,
+                "pass_rate": best_available.pass_rate,
+                "n_passing": best_available.n_passing,
+                "n_conditions": best_available.n_conditions,
+            },
+            "pvt": None,
+            "selection_basis": "PVT qualification failed closed",
+        }
     matching_design = next(d for d in designs if d.design_id == top.design_id)
     return {
         "selected": {
@@ -391,9 +434,10 @@ def run_pipeline(
         episodes=episodes, horizon=horizon, backend=backend, randomize_initial_state=randomize_initial_state,
         initial_indices_source=initial_indices_source,
     )
-    feasible = filter_nominal_feasible(candidates)
+    feasible = filter_nominal_feasible(candidates, target)
     selection = select_final_design(
         feasible, pvt_conditions=pvt_conditions, trade_off_preference=trade_off_preference,
+        target=target,
     )
 
     result: dict[str, Any] = {
@@ -403,6 +447,16 @@ def run_pipeline(
         "n_candidates_generated": len(candidates),
         "n_nominally_feasible": len(feasible),
         "selection": selection,
+        "candidate_assessments": [
+            {
+                "episode": candidate.episode,
+                "autockt_terminal_success": candidate.spec_satisfied,
+                "strict_target": assess_target(
+                    candidate.metrics, target, simulator_success=candidate.evaluation_success,
+                ).to_dict(),
+            }
+            for candidate in candidates
+        ],
     }
 
     if selection["selected"] is not None and measure_hd3_noise_flag and backend == "real":
@@ -443,6 +497,7 @@ def run_pipeline(
             nominal_metrics=selection["selected"]["metrics"],
             nominal_source=source_note,
             pvt_result=_pvt_result_from_selection(selection),
+            target=target,
         )
         result["final_specification"] = report
 

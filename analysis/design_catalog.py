@@ -41,8 +41,18 @@ class FeasibleDesign:
     # across differing native_reward_scale values. See uniform_reward below
     # for a value that IS comparable across the whole catalog.
 
-    def parameter_key(self, ndigits: int = 6) -> tuple:
-        return tuple(round(self.parameters[name], ndigits) for name in sorted(self.parameters))
+    def parameter_key(self, significant_digits: int = 12) -> tuple:
+        """Unit-safe key that does not erase pico/femto-scale parameters.
+
+        Decimal-place rounding made every capacitance below 1e-6 become zero.
+        Significant-digit formatting preserves scale while still tolerating
+        insignificant float serialization noise.
+        """
+
+        return tuple(
+            (name, format(float(self.parameters[name]), f".{significant_digits}g"))
+            for name in sorted(self.parameters)
+        )
 
     @property
     def uniform_reward(self) -> float:
@@ -169,15 +179,15 @@ def load_all_known_feasible_designs() -> list[FeasibleDesign]:
     return designs
 
 
-def deduplicate(designs: list[FeasibleDesign], ndigits: int = 6) -> list[FeasibleDesign]:
-    """Drops designs whose 5 parameters are identical (to `ndigits`) to an
+def deduplicate(designs: list[FeasibleDesign], significant_digits: int = 12) -> list[FeasibleDesign]:
+    """Drops designs whose parameters agree to the requested significant digits,
     earlier design in the list, keeping the first occurrence.
     """
 
     seen: set[tuple] = set()
     unique: list[FeasibleDesign] = []
     for design in designs:
-        key = design.parameter_key(ndigits)
+        key = design.parameter_key(significant_digits)
         if key in seen:
             continue
         seen.add(key)

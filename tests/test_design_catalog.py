@@ -41,6 +41,14 @@ class DeduplicateTests(unittest.TestCase):
         unique = deduplicate([a, b])
         self.assertEqual(len(unique), 2)
 
+    def test_keeps_distinct_pico_scale_capacitances(self):
+        base = {"rload_ohm": 1000.0, "rdeg_ohm": 500.0,
+                "cdeg_f": 1e-13, "itail_a": 1e-4, "dfe_tap_v": 0.0}
+        changed = dict(base, cdeg_f=2e-13)
+        a = FeasibleDesign("a", "f", "d", base, {}, 10.0, "autockt_reward")
+        b = FeasibleDesign("b", "f", "d", changed, {}, 10.0, "autockt_reward")
+        self.assertEqual(len(deduplicate([a, b])), 2)
+
 
 class RankByMeasuredTradeOffsTests(unittest.TestCase):
     def test_label_only_assigned_to_the_actual_best_measured_value(self):

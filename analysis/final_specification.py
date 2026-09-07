@@ -17,6 +17,8 @@ from typing import Optional
 
 from analysis.area_estimate import estimate_ctle_area
 from analysis.pvt_selection import PVTRobustnessResult, load_pvt_results_from_jsonl
+from analysis.target_assessment import assess_target
+from rl.target_spec import TargetSpec
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,7 @@ def build_final_specification_report(
     nominal_metrics: dict[str, float],
     nominal_source: str,
     pvt_result: Optional[PVTRobustnessResult] = None,
+    target: Optional[TargetSpec] = None,
 ) -> dict:
     """Pure function over already-known data -- no simulation. Callers
     supply the design's real parameters, its real nominal-condition metrics
@@ -54,6 +57,8 @@ def build_final_specification_report(
     """
 
     area = estimate_ctle_area()
+    effective_target = target or TargetSpec.from_existing_thresholds()
+    target_assessment = assess_target(nominal_metrics, effective_target, simulator_success=True)
 
     def metric(name: str) -> Optional[float]:
         return nominal_metrics.get(name)
@@ -121,6 +126,8 @@ def build_final_specification_report(
     return {
         "design_id": design_id,
         "parameters": parameters,
+        "requested_target": effective_target.as_dict(),
+        "target_qualification": target_assessment.to_dict(),
         "rows": [
             {"metric": r.metric, "measured": r.measured, "requirement": r.requirement,
              "verdict": r.verdict, "source": r.source}
@@ -165,11 +172,15 @@ def _main() -> int:
             nominal_metrics = nominal_row["metrics"]
             nominal_source = f"{rerun_path} (tt/1.8V/27C point)"
 
-    pvt_result = load_pvt_results_from_jsonl("design_a", rerun_path) if rerun_path.is_file() else None
+    target = TargetSpec.from_existing_thresholds()
+    pvt_result = (
+        load_pvt_results_from_jsonl("design_a", rerun_path, target=target)
+        if rerun_path.is_file() else None
+    )
 
     report = build_final_specification_report(
         design_id="design_a", parameters=parameters, nominal_metrics=nominal_metrics,
-        nominal_source=nominal_source, pvt_result=pvt_result,
+        nominal_source=nominal_source, pvt_result=pvt_result, target=target,
     )
     output_path = Path("results/design_a_final_specification.json")
     if output_path.exists():
