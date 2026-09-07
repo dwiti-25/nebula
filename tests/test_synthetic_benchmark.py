@@ -116,6 +116,41 @@ class SyntheticLandscapeTests(unittest.TestCase):
         self.assertTrue(math.isfinite(step_out.reward))
 
 
+class SyntheticGradedEvaluatorTests(unittest.TestCase):
+    """rl/synthetic_benchmark.py::synthetic_evaluate_receiver_graded --
+    additive, PPO model-improvement study only. synthetic_evaluate_receiver
+    itself (tested above) is completely unchanged.
+    """
+
+    def test_near_center_still_succeeds(self):
+        from rl.synthetic_benchmark import synthetic_evaluate_receiver_graded
+        result = synthetic_evaluate_receiver_graded(_parameters_at_fraction(0.5))
+        self.assertTrue(result.success)
+        self.assertIsNone(result.failed_stage)
+
+    def test_middle_band_reports_transient_failure_with_real_metrics(self):
+        from rl.synthetic_benchmark import synthetic_evaluate_receiver_graded
+        # fraction=0.07 -> distance = sqrt(5)*0.43 ~= 0.962, inside (0.9, 1.05]
+        result = synthetic_evaluate_receiver_graded(_parameters_at_fraction(0.07))
+        self.assertFalse(result.success)
+        self.assertEqual(result.failed_stage, "transient")
+        self.assertIn("dfe_locked_phase_eye_height_v", result.metrics)
+
+    def test_far_corner_reports_no_information_failure(self):
+        from rl.synthetic_benchmark import synthetic_evaluate_receiver_graded
+        result = synthetic_evaluate_receiver_graded(_parameters_at_fraction(1.0))
+        self.assertFalse(result.success)
+        self.assertEqual(result.failed_stage, "synthetic_out_of_region")
+        self.assertEqual(result.metrics, {})
+
+    def test_original_synthetic_evaluator_is_unaffected(self):
+        # The original function's own behavior at the SAME far-corner point
+        # must be byte-for-byte unchanged (binary success/no-info only).
+        far = synthetic_evaluate_receiver(_parameters_at_fraction(1.0))
+        self.assertEqual(far.failed_stage, SYNTHETIC_FAILURE_STAGE)
+        self.assertEqual(far.metrics, {})
+
+
 class SyntheticPPOLearningTests(unittest.TestCase):
     """Establishes whether the PPO implementation can learn at all, using
     the cheap synthetic backend. This says NOTHING about circuit

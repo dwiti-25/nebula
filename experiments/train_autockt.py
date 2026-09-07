@@ -40,14 +40,18 @@ import argparse
 import copy
 import json
 from pathlib import Path
+import uuid
 
 import torch
 
 from simulator.rl_adapter import ACTION_SCHEMA_VERSION, ReceiverRLAdapter, RLBudget
 
 from rl.autockt_env import AutoCktReceiverEnv
-from rl.autockt_reward import AUTOCKT_REWARD_VERSION
+from rl.autockt_reward import AUTOCKT_REWARD_VERSION, graded_autockt_reward
 from rl.autockt_state import STATE_DIM
+from rl.autockt_state_v2 import STATE_DIM_V2
+from rl.checkpoint import save_full_checkpoint
+from rl.evaluation_cache import make_cached_evaluator
 from rl.parameter_grid import (
     DEFAULT_GRID_POINTS,
     PARAMETER_NAMES,
@@ -59,6 +63,7 @@ from rl.ppo_agent import PPOAgent
 from rl.synthetic_benchmark import synthetic_evaluate_receiver
 from rl.target_spec import EXISTING_THRESHOLDS, SPEC_NAMES, TargetSpec, sample_target_pool
 from rl.trainer import train
+from analysis.run_evidence import JsonlEventWriter
 
 
 def _build_target_pools(args: argparse.Namespace) -> tuple[tuple[TargetSpec, ...], tuple[TargetSpec, ...]]:
@@ -149,6 +154,8 @@ def _evaluate_checkpoint(
     randomize_initial_state: bool,
     seed: int,
     episodes: int,
+    reward_fn=None,
+    rl_version: str = "v1",
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     """[NEBULA ADAPTATION] Frozen-checkpoint evaluation, not part of the
     AutoCkt-replicated training loop itself. Runs `episodes` fully
@@ -172,6 +179,9 @@ def _evaluate_checkpoint(
         grids=grids,
         seed=seed,
         randomize_initial_state=randomize_initial_state,
+        reward_fn=reward_fn,
+        evaluate_on_reset=rl_version == "v2", state_schema=rl_version,
+        use_reward_v2=rl_version == "v2",
     )
     rows: list[dict[str, object]] = []
     episode_rewards = []
@@ -338,6 +348,13 @@ def main() -> int:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-evaluations", type=int, default=10_000)
+    parser.add_argument("--rl-version", choices=("v1", "v2"), default="v1",
+                        help="Keep v1 reproducible or opt into corrected PPO v2.")
+    parser.add_argument("--evaluation-cache", action="store_true",
+                        help="Reuse exact repeated evaluations without changing trajectories.")
+    parser.add_argument("--events-output", type=Path, default=None,
+                        help="Append-only typed PPO events; defaults beside --output.")
+    parser.add_argument("--save-full-checkpoint", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=Path("results/autockt_training.jsonl"))
     parser.add_argument(
         "--initial-indices-source", choices=("verified", "grid-center"), default="verified",
@@ -349,6 +366,19 @@ def main() -> int:
         "result, for experiments that must not warm-start PPO from a known-good design.",
     )
     parser.add_argument(
+        "--reward-mode", choices=("terminal", "graded"), default="terminal",
+        help="[NEBULA ADAPTATION] 'terminal' (default, unchanged existing behavior): "
+        "rl.autockt_reward.autockt_reward, a flat FAILURE_REWARD on any failure. "
+        "'graded': rl.autockt_reward.graded_autockt_reward -- identical on success; "
+        "additionally grades a `transient`-stage failure (real per-spec distances are "
+        "available) by the same relative-error-sum formula the success branch uses, "
+        "instead of the same flat penalty every failure gets under 'terminal'. Earlier-"
+        "stage failures (dc/ac/ctle_transient/channel, no real per-spec measurement) "
+        "still get a fixed floor either way. See rl/autockt_reward.py for the full "
+        "diagnosis this addresses (docs/autockt-mapping.md sec 20's zero-variance "
+        "reward collapse).",
+    )
+    parser.add_argument(
         "--save-final-policy", type=Path, default=None,
         help="[NEBULA ADAPTATION -- pure I/O, no formulation change] optional path to "
         "torch.save the trained policy's state_dict after training completes. Default "
@@ -358,13 +388,19 @@ def main() -> int:
     args = parser.parse_args()
 
     training_pool, validation_pool = _build_target_pools(args)
+    reward_fn = graded_autockt_reward if args.reward_mode == "graded" and args.rl_version == "v1" else None
+    effective_reward_version = "reward_v2" if args.rl_version == "v2" else AUTOCKT_REWARD_VERSION
 
     grids = build_parameter_grids(args.grid_points, spacing=args.grid_spacing)
     initial_indices = _resolve_initial_indices(grids, args.initial_indices_source)
 
-    if args.backend == "synthetic":
+    evaluator = synthetic_evaluate_receiver if args.backend == "synthetic" else None
+    if args.evaluation_cache:
+        from simulator.receiver import evaluate_receiver
+        evaluator = make_cached_evaluator(evaluator or evaluate_receiver)
+    if evaluator is not None:
         adapter = ReceiverRLAdapter(
-            evaluator=synthetic_evaluate_receiver, budget=RLBudget(args.max_evaluations), seed=args.seed
+            evaluator=evaluator, budget=RLBudget(args.max_evaluations), seed=args.seed
         )
     else:
         adapter = ReceiverRLAdapter(budget=RLBudget(args.max_evaluations), seed=args.seed)
@@ -376,18 +412,31 @@ def main() -> int:
         grids=grids,
         seed=args.seed,
         randomize_initial_state=args.randomize_initial_state,
+        reward_fn=reward_fn,
+        evaluate_on_reset=args.rl_version == "v2", state_schema=args.rl_version,
+        use_reward_v2=args.rl_version == "v2", max_total_evaluations=args.max_evaluations,
     )
-    agent = PPOAgent(state_dim=STATE_DIM, num_heads=len(PARAMETER_NAMES), seed=args.seed)
+    agent = PPOAgent(state_dim=STATE_DIM_V2 if args.rl_version == "v2" else STATE_DIM,
+                     num_heads=len(PARAMETER_NAMES), seed=args.seed)
     initial_policy_state = copy.deepcopy(agent.policy.state_dict()) if args.checkpoint_eval_episodes > 0 else None
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     output_file = args.output.open("w", encoding="utf-8")
+    run_id = uuid.uuid4().hex
+    events_path = args.events_output or args.output.with_suffix(".events.jsonl")
+    event_writer = JsonlEventWriter(events_path, metadata={
+        "algorithm": "ppo", "configuration_id": f"ppo_{args.rl_version}",
+        "state_schema": args.rl_version,
+        "reward_schema": "reward_v2" if args.rl_version == "v2" else "autockt_reward_v1",
+        "target_split": "training", "training_seed": args.seed,
+        "tuning_seed": None, "final_evaluation_seed": None,
+    })
 
     def on_step(row: dict[str, object]) -> None:
         record = {
             **row,
             "action_schema_version": ACTION_SCHEMA_VERSION,
-            "reward_version": AUTOCKT_REWARD_VERSION,
+            "reward_version": effective_reward_version,
             "seed": args.seed,
         }
         output_file.write(json.dumps(record) + "\n")
@@ -402,7 +451,7 @@ def main() -> int:
             {
                 "run_start": True,
                 "seed": args.seed,
-                "reward_version": AUTOCKT_REWARD_VERSION,
+                "reward_version": effective_reward_version,
                 "action_schema_version": ACTION_SCHEMA_VERSION,
                 "spec_names": SPEC_NAMES,
                 "training_targets": [spec.as_dict() for spec in training_pool],
@@ -415,6 +464,9 @@ def main() -> int:
                 "grid_points": args.grid_points,
                 "grid_spacing": args.grid_spacing,
                 "randomize_initial_state": args.randomize_initial_state,
+                "reward_mode": args.reward_mode,
+                "rl_version": args.rl_version,
+                "events_output": str(events_path),
             },
             indent=2,
             default=list,
@@ -431,6 +483,8 @@ def main() -> int:
         minibatch_size=args.minibatch_size,
         on_step=on_step,
         on_update=on_update,
+        on_event=event_writer,
+        run_id=run_id,
     )
     if args.save_final_policy is not None:
         args.save_final_policy.parent.mkdir(parents=True, exist_ok=True)
@@ -452,6 +506,8 @@ def main() -> int:
                 randomize_initial_state=args.randomize_initial_state,
                 seed=checkpoint_seed,
                 episodes=args.checkpoint_eval_episodes,
+                reward_fn=reward_fn,
+                rl_version=args.rl_version,
             )
             checkpoint_summaries.append(summary_row)
             print(json.dumps({"checkpoint_complete": True, **summary_row}, indent=2), flush=True)
@@ -461,6 +517,16 @@ def main() -> int:
         # Leave the agent holding the fully-trained final policy regardless
         # of which checkpoint was evaluated last.
         agent.policy.load_state_dict(final_policy_state)
+
+    if args.save_full_checkpoint is not None:
+        save_full_checkpoint(
+            args.save_full_checkpoint, agent=agent, update_count=args.updates,
+            evaluation_count=result.total_evaluations, state_schema=args.rl_version,
+            reward_schema=args.rl_version,
+            grid_points=args.grid_points, grid_spacing=args.grid_spacing,
+            target_ids=tuple(f"training_{index}" for index, _ in enumerate(training_pool)),
+            repo_root=Path(__file__).resolve().parents[1],
+        )
 
     validation_rows = _evaluate_validation_pool(env=env, agent=agent, validation_pool=validation_pool)
 
@@ -474,6 +540,10 @@ def main() -> int:
         "validation_results": validation_rows,
         "checkpoint_evaluations": checkpoint_summaries,
         "seed": args.seed,
+        "reward_mode": args.reward_mode,
+        "rl_version": args.rl_version,
+        "reward_version": effective_reward_version,
+        "events_output": str(events_path),
         "output": str(args.output),
     }
     print(json.dumps(summary, indent=2))

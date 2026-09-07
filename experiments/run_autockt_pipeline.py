@@ -64,6 +64,8 @@ from simulator.rl_adapter import ReceiverRLAdapter, RLBudget
 
 from rl.autockt_env import AutoCktReceiverEnv
 from rl.autockt_state import STATE_DIM
+from rl.autockt_state_v2 import STATE_DIM_V2
+from rl.evaluation_cache import make_cached_evaluator
 from rl.parameter_grid import PARAMETER_NAMES, build_parameter_grids
 from rl.ppo_agent import PPOAgent
 from rl.synthetic_benchmark import synthetic_evaluate_receiver
@@ -109,6 +111,42 @@ PVT_CONDITION_SETS: dict[str, Optional[tuple[SimulationConditions, ...]]] = {
     "minimal27": pvt_sweep.MINIMAL_27_CONDITIONS,
 }
 
+# Runtime diagnosis (docs/autockt-mapping.md sec 24 / RUNTIME investigation):
+# select_final_design's own fidelity default (EvaluationFidelity.FINAL) was
+# being silently inherited by EVERY non-"none" PVT set, including "smoke" --
+# whose whole design intent (see the --pvt-condition-set help text below) is
+# to be the CHEAP, small-condition-count option. A direct diagnostic (one
+# known-good candidate, both smoke conditions, real ngspice) measured
+# ~281-290s per condition at FINAL fidelity, ~571s combined for just ONE
+# candidate -- legitimate, successful computation (no hang, no crash, no
+# convergence failure) that nonetheless looks indistinguishable from a hung
+# UI run, since nothing surfaces stage-level progress.
+#
+# CANDIDATE fidelity runs the IDENTICAL stage set as FINAL (verified by
+# reading simulator/receiver.py directly: dc/ac/ctle_transient/channel_
+# diagnostics/noise/hd3/transient are all gated at <=CANDIDATE) -- FINAL
+# only adds a 3-amplitude HD3 characterization sweep (characterize=True)
+# instead of CANDIDATE's single amplitude, which changes HD3 METRIC VALUES
+# only. analysis.pvt_selection.run_pvt_evaluation reads only
+# evaluation.success/failed_stage (never .metrics) to build PVTPointResult,
+# and select_with_trade_off_preference's tie-break reads the candidate's
+# already-computed NOMINAL metrics (from generate_candidates), never
+# anything produced by the PVT sweep itself -- so PVT feasibility and
+# "most robust"/trade-off selection use zero information FINAL adds over
+# CANDIDATE. CANDIDATE is fidelity-sufficient for this consumer, and roughly
+# halves the HD3 stage's contribution (~70-86s -> ~23-29s per condition,
+# confirmed by direct measurement of both fidelities on the same candidate).
+#
+# "minimal27" (the actual robustness proof) deliberately keeps FINAL --
+# only "smoke" (explicitly a cheap pre-check, never itself a robustness
+# claim) is downgraded. Explicit per-named-set mapping, not a change to
+# select_final_design's own default (still FINAL for any caller that
+# doesn't pass pvt_fidelity, e.g. existing tests/other call sites).
+PVT_CONDITION_SET_FIDELITY: dict[str, EvaluationFidelity] = {
+    "smoke": EvaluationFidelity.CANDIDATE,
+    "minimal27": EvaluationFidelity.FINAL,
+}
+
 
 # ---------------------------------------------------------------------------
 # Stage 1: target validation
@@ -146,7 +184,7 @@ class PipelineCandidate:
     evaluation_success: bool = True
 
 
-def _load_checkpoint_state(checkpoint_path: Path) -> dict[str, Any]:
+def _load_checkpoint_payload(checkpoint_path: Path) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
     """Load a policy state from a loose file or the immutable artifact ZIP."""
 
     if checkpoint_path.is_file():
@@ -156,7 +194,15 @@ def _load_checkpoint_state(checkpoint_path: Path) -> dict[str, Any]:
         if packaged is None:
             raise FileNotFoundError(f"checkpoint not found on disk or in artifact package: {checkpoint_path}")
         checkpoint_source = io.BytesIO(packaged)
-    return torch.load(checkpoint_source, weights_only=True)
+    payload = torch.load(checkpoint_source, weights_only=True)
+    if "policy_state_dict" in payload:
+        return payload["policy_state_dict"], payload.get("metadata")
+    return payload, None
+
+
+def _load_checkpoint_state(checkpoint_path: Path) -> dict[str, Any]:
+    """Backward-compatible inference-only policy loader."""
+    return _load_checkpoint_payload(checkpoint_path)[0]
 
 
 def generate_candidates(
@@ -173,6 +219,8 @@ def generate_candidates(
     initial_indices_source: str = "verified",
     randomize_initial_state: bool = True,
     max_evaluations: int = 1000,
+    rl_version: str = "v1",
+    use_evaluation_cache: bool = False,
 ) -> list[PipelineCandidate]:
     """Deterministic rollout of an existing policy against `target`, via the
     real, UNMODIFIED AutoCktReceiverEnv + PPOAgent + ReceiverRLAdapter.
@@ -188,18 +236,34 @@ def generate_candidates(
     grids = build_parameter_grids(grid_points, spacing=grid_spacing)
     initial_indices = _resolve_initial_indices(grids, initial_indices_source)
 
+    if rl_version not in {"v1", "v2"}:
+        raise ValueError("rl_version must be 'v1' or 'v2'")
     adapter_kwargs: dict[str, Any] = {}
     if backend == "synthetic":
         adapter_kwargs["evaluator"] = synthetic_evaluate_receiver
+    if use_evaluation_cache:
+        adapter_kwargs["evaluator"] = make_cached_evaluator(
+            adapter_kwargs.get("evaluator", evaluate_receiver)
+        )
     adapter = ReceiverRLAdapter(budget=RLBudget(max_evaluations), seed=eval_seed, **adapter_kwargs)
 
+    v2 = rl_version == "v2"
     env = AutoCktReceiverEnv(
         target_pool=(target,), initial_indices=initial_indices, horizon=horizon,
         adapter=adapter, grids=grids, seed=eval_seed, randomize_initial_state=randomize_initial_state,
+        evaluate_on_reset=v2, state_schema=rl_version,
+        use_reward_v2=v2, max_total_evaluations=max_evaluations,
     )
-    agent = PPOAgent(state_dim=STATE_DIM, num_heads=len(PARAMETER_NAMES), seed=agent_seed)
+    agent = PPOAgent(state_dim=STATE_DIM_V2 if v2 else STATE_DIM,
+                     num_heads=len(PARAMETER_NAMES), seed=agent_seed)
     if checkpoint_path is not None:
-        agent.policy.load_state_dict(_load_checkpoint_state(checkpoint_path))
+        policy_state, metadata = _load_checkpoint_payload(checkpoint_path)
+        if metadata and metadata.get("state_schema") != rl_version:
+            raise ValueError(
+                f"checkpoint uses state schema {metadata.get('state_schema')!r}, "
+                f"but --rl-version={rl_version!r} was requested"
+            )
+        agent.policy.load_state_dict(policy_state)
 
     candidates: list[PipelineCandidate] = []
     for episode in range(episodes):
@@ -406,6 +470,57 @@ def measure_hd3_and_noise(
 
 
 # ---------------------------------------------------------------------------
+# PVT progress reporting (experiments/web_ui.py "Add visible PVT progress"):
+# small, purely additive stdout output so a subprocess caller can show real
+# progress for a long PVT run instead of an opaque "running" state. Does
+# NOT change select_final_design/PVT_CONDITION_SET_FIDELITY (commit
+# 54eeb04) or any evaluation result: each single-condition call below is
+# behaviorally identical to evaluate_pvt_grid's own per-condition loop
+# (analysis.pvt_selection.run_pvt_evaluation never passes
+# stop_on_failure=True, so there is no early-exit difference to preserve).
+# ---------------------------------------------------------------------------
+
+def _pvt_progress_evaluator(feasible_candidates: list[PipelineCandidate], real_evaluate_pvt_grid):
+    """Wraps analysis.pvt_selection.evaluate_pvt_grid (same call signature)
+    to emit one flush=True JSON line per (design, condition) pair -- start
+    and complete -- to stdout. select_final_design calls run_pvt_evaluation
+    once per design, in the same order as feasible_candidates, so a simple
+    counter recovers which design_id (matching _candidate_to_design's own
+    f"pipeline_ep{episode}" naming) each call belongs to.
+    """
+    total_designs = len(feasible_candidates)
+    design_index = 0
+
+    def wrapped(parameters, *, conditions, fidelity):
+        nonlocal design_index
+        design_id = f"pipeline_ep{feasible_candidates[design_index].episode}"
+        total_conditions = len(conditions)
+        results = []
+        for condition_index, condition in enumerate(conditions):
+            print(json.dumps({
+                "nebula_progress_event": "pvt_condition_start",
+                "design_id": design_id, "design_index": design_index, "total_designs": total_designs,
+                "condition_index": condition_index, "total_conditions_per_design": total_conditions,
+                "corner": condition.process_corner.value, "temperature_c": condition.temperature_c,
+                "supply_v": condition.supply_v,
+            }), flush=True)
+            (evaluation,) = real_evaluate_pvt_grid(parameters, conditions=(condition,), fidelity=fidelity)
+            results.append(evaluation)
+            print(json.dumps({
+                "nebula_progress_event": "pvt_condition_complete",
+                "design_id": design_id, "design_index": design_index, "total_designs": total_designs,
+                "condition_index": condition_index, "total_conditions_per_design": total_conditions,
+                "corner": condition.process_corner.value, "temperature_c": condition.temperature_c,
+                "supply_v": condition.supply_v,
+                "success": evaluation.success, "failed_stage": evaluation.failed_stage,
+            }), flush=True)
+        design_index += 1
+        return tuple(results)
+
+    return wrapped
+
+
+# ---------------------------------------------------------------------------
 # Full pipeline
 # ---------------------------------------------------------------------------
 
@@ -421,9 +536,12 @@ def run_pipeline(
     randomize_initial_state: bool = True,
     initial_indices_source: str = "verified",
     pvt_conditions: Optional[tuple] = None,
+    pvt_fidelity: Optional[EvaluationFidelity] = None,
     trade_off_preference: str = "most_robust",
     measure_hd3_noise_flag: bool = False,
     export_schematic_to: Optional[Path] = None,
+    rl_version: str = "v1",
+    use_evaluation_cache: bool = False,
 ) -> dict[str, Any]:
     problems = validate_target(target)
     if problems:
@@ -433,16 +551,38 @@ def run_pipeline(
         target=target, checkpoint_path=checkpoint_path, agent_seed=agent_seed, eval_seed=eval_seed,
         episodes=episodes, horizon=horizon, backend=backend, randomize_initial_state=randomize_initial_state,
         initial_indices_source=initial_indices_source,
+        rl_version=rl_version, use_evaluation_cache=use_evaluation_cache,
     )
     feasible = filter_nominal_feasible(candidates, target)
-    selection = select_final_design(
-        feasible, pvt_conditions=pvt_conditions, trade_off_preference=trade_off_preference,
-        target=target,
-    )
+    print(json.dumps({
+        "nebula_progress_event": "candidate_generation_complete",
+        "n_feasible": len(feasible),
+        "pvt_conditions_total": (len(feasible) * len(pvt_conditions)) if pvt_conditions else 0,
+    }), flush=True)
+
+    if pvt_conditions is not None:
+        import analysis.pvt_selection as _pvt_selection_module
+        _real_evaluate_pvt_grid = _pvt_selection_module.evaluate_pvt_grid
+        _pvt_selection_module.evaluate_pvt_grid = _pvt_progress_evaluator(feasible, _real_evaluate_pvt_grid)
+        try:
+            selection = select_final_design(
+                feasible, pvt_conditions=pvt_conditions, pvt_fidelity=pvt_fidelity,
+                trade_off_preference=trade_off_preference, target=target,
+            )
+        finally:
+            _pvt_selection_module.evaluate_pvt_grid = _real_evaluate_pvt_grid
+    else:
+        selection = select_final_design(
+            feasible, pvt_conditions=pvt_conditions, pvt_fidelity=pvt_fidelity,
+            trade_off_preference=trade_off_preference, target=target,
+        )
 
     result: dict[str, Any] = {
         "target": target.as_dict(),
         "backend": backend,
+        "rl_version": rl_version,
+        "state_schema": rl_version,
+        "reward_schema": "reward_v2" if rl_version == "v2" else "autockt_reward_v1",
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
         "n_candidates_generated": len(candidates),
         "n_nominally_feasible": len(feasible),
@@ -516,6 +656,10 @@ def _main() -> int:
              "--target-mode uses; no new target semantics.",
     )
     parser.add_argument("--checkpoint", type=Path, default=None)
+    parser.add_argument("--rl-version", choices=("v1", "v2"), default="v1",
+                        help="Versioned PPO configuration; v1 remains the historical baseline.")
+    parser.add_argument("--evaluation-cache", action="store_true",
+                        help="Cache exact repeated evaluator calls (recommended for PPO v2).")
     parser.add_argument("--backend", choices=("real", "synthetic"), default="synthetic")
     parser.add_argument("--episodes", type=int, default=3)
     parser.add_argument("--horizon", type=int, default=4)
@@ -527,8 +671,11 @@ def _main() -> int:
                          help="'none' (default, unchanged behavior): NOMINAL-ONLY selection -- the selected design "
                               "is NOT validated across process/voltage/temperature, only at nominal TT/1.8V/27C; "
                               "do not read a 'none' run as PVT-robust. 'smoke': 2 conditions (nominal TT + one "
-                              "stress corner) -- exercises the PVT-aware selection pathway with real SPICE, still "
-                              "NOT a robustness proof. 'minimal27': the full 27-point TT/SS/FF x VDD+/-5% x "
+                              "stress corner), evaluated at EvaluationFidelity.CANDIDATE (not FINAL -- CANDIDATE "
+                              "runs the identical stage set and is sufficient for pass/fail feasibility and "
+                              "trade-off selection, see PVT_CONDITION_SET_FIDELITY's comment) -- exercises the "
+                              "PVT-aware selection pathway with real SPICE, still NOT a robustness proof. "
+                              "'minimal27': the full 27-point TT/SS/FF x VDD+/-5% x "
                               "0-125C robustness sweep (experiments/pvt_sweep.py's own MINIMAL_27_CONDITIONS) -- "
                               "the only choice that constitutes an actual PVT robustness result; SLOW "
                               "(~121.8 min historically for one design, docs/autockt-mapping.md sec 22) and never "
@@ -566,9 +713,11 @@ def _main() -> int:
         randomize_initial_state=args.randomize_initial_state,
         initial_indices_source=args.initial_indices_source,
         pvt_conditions=PVT_CONDITION_SETS[args.pvt_condition_set],
+        pvt_fidelity=PVT_CONDITION_SET_FIDELITY.get(args.pvt_condition_set),
         trade_off_preference=args.trade_off_preference,
         measure_hd3_noise_flag=args.measure_hd3_noise,
         export_schematic_to=args.export_schematic,
+        rl_version=args.rl_version, use_evaluation_cache=args.evaluation_cache,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")

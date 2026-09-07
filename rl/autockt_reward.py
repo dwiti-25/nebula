@@ -86,3 +86,73 @@ def autockt_reward(
 
 def is_spec_satisfied(current_metrics: Mapping[str, float], target: TargetSpec, *, success: bool) -> bool:
     return success and autockt_reward(current_metrics, target, success=success) >= TERMINAL_BONUS
+
+
+# [NEBULA ADAPTATION] additive alternative reward -- autockt_reward above is
+# NEVER modified, and every existing caller/historical result (all PPO
+# training/benchmark logs in results/) stays on it, byte-for-byte unchanged
+# behavior. This addresses a confirmed collapse, not a hypothesized one:
+# docs/autockt-mapping.md sec 20's fair, no-warm-start PPO trial had every
+# one of 20 episodes fail at the `dc` stage, so autockt_reward's own flat
+# FAILURE_REWARD was returned every single time -- mean_episode_reward was
+# exactly -1.0 across all 4 updates, zero variance, meaning the policy-
+# gradient update had nothing to differentiate any of the 20 sampled actions
+# by, regardless of how close (or far) each one actually came.
+#
+# Root cause, diagnosed from simulator/rl_adapter.py::observation_from_evaluation
+# and rl/autockt_env.py::metrics_from_observation: the adapter always
+# zero-fills SPEC_NAMES-shaped metrics that were never measured. So naively
+# grading EVERY failure the way autockt_reward's success branch does would
+# NOT fix the collapse -- it would silently replace one constant (-1.0) with
+# a DIFFERENT constant (the relative-error sum against four zero-filled,
+# fabricated "achieved" values), since a dc/ac/ctle_transient/channel
+# failure never reaches the stage that actually computes
+# dfe_locked_phase_eye_height_v/eye_width_ui/min_margin_v/ctle_power_w. Only
+# a failure AT the `transient` stage itself (which computes all four before
+# failing one of their hard gates) carries real, non-fabricated per-spec
+# distance information. This mirrors experiments/train_cem.py's own,
+# already-validated graded_cem_fitness and its GRADED_FITNESS_RELIABLE_STAGES
+# gate, for the identical reason -- not a new idea, the same fix applied to
+# PPO's reward instead of CEM's fitness.
+GRADED_RELIABLE_STAGES: tuple[str | None, ...] = (None, "transient")
+
+# Strictly below the graded branch's own attainable range (a sum of <= 4
+# negative signed_relative_error terms, each individually bounded by
+# lookup()'s own ~[-1, 1] range -- so at most roughly -4 in practice) --
+# chosen so a no-information failure (dc/ac/ctle_transient/channel) can
+# never be mistaken for, or numerically outrank, a graded transient-stage
+# failure that came closer. This is a structural bound, not a tuned weight:
+# the same reasoning and role as experiments/train_cem.py's own
+# GRADED_FITNESS_NO_INFORMATION_FLOOR (-10.0), reused here as the identical
+# value for the identical reason.
+GRADED_NO_INFORMATION_FLOOR = -10.0
+
+
+def graded_autockt_reward(
+    current_metrics: Mapping[str, float],
+    target: TargetSpec,
+    *,
+    success: bool,
+    failure_stage: str | None,
+) -> float:
+    """[NEBULA ADAPTATION] Identical to autockt_reward when success=True
+    (same formula, same TERMINAL_BONUS -- success handling is untouched).
+    Differs only in how a FAILURE is scored: autockt_reward always returns
+    the flat FAILURE_REWARD; this function additionally grades a
+    `transient`-stage failure (real per-spec distances are available, see
+    module comment above GRADED_RELIABLE_STAGES) by the same relative-
+    error-sum formula the success branch uses, and falls back to the fixed,
+    deliberately-dominated GRADED_NO_INFORMATION_FLOOR only for failures at
+    any earlier stage, where no real per-spec measurement exists to grade.
+    """
+
+    if success:
+        return autockt_reward(current_metrics, target, success=True)
+    if failure_stage not in GRADED_RELIABLE_STAGES:
+        return GRADED_NO_INFORMATION_FLOOR
+    total = 0.0
+    for name in SPEC_NAMES:
+        relative_error = signed_relative_error(name, lookup(current_metrics.get(name, 0.0), getattr(target, name)))
+        if relative_error < 0:
+            total += relative_error
+    return total  # <= 0.0 always; never reaches TERMINAL_BONUS, so `done` semantics are unaffected

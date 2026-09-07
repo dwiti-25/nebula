@@ -25,6 +25,8 @@ import time
 from typing import Callable
 
 from .autockt_env import AutoCktReceiverEnv
+from .events import build_step_event, build_update_event
+from .parameter_grid import PARAMETER_NAMES
 from .ppo_agent import PPOAgent, Transition
 
 # [ROUGH-SCALE ADAPTATION] see module docstring.
@@ -49,6 +51,9 @@ def collect_rollout(
     episodes: int,
     episode_index_start: int = 0,
     on_step: Callable[[dict[str, object]], None] | None = None,
+    on_event: Callable[[dict[str, object]], None] | None = None,
+    run_id: str = "",
+    update_index: int = 0,
 ) -> tuple[list[Transition], float, list[EpisodeLog]]:
     """Runs `episodes` full episodes (each up to env.horizon steps, or ending
     earlier via the AutoCkt-replicated `done` condition in
@@ -66,13 +71,47 @@ def collect_rollout(
 
     for offset in range(episodes):
         episode_index = episode_index_start + offset
+        if env.budget_exhausted():
+            # [NEBULA ADAPTATION -- Required change 4] the env's own
+            # step()/reset() already refuse to make a further simulator
+            # call once the budget is exhausted (see rl/autockt_env.py),
+            # so this is a pure efficiency stop, not a correctness fix --
+            # avoids collecting further reset+truncated-step cycles that
+            # can never make real progress once no evaluations remain.
+            break
         state, reset_info = env.reset()
         episode_log = EpisodeLog(episode_index=episode_index, target=reset_info["target"])
         done = False
         truncated = False
         while not done and not truncated:
             choices, log_prob, value = agent.act(state)
+            indices_before = env.indices
+            parameters_before = {
+                name: env.grids[name].value_at(index) for name, index in zip(PARAMETER_NAMES, indices_before)
+            }
             step_out = env.step(choices)
+            if on_event is not None:
+                # [NEBULA ADAPTATION -- Required change 6] purely additive:
+                # existing on_step/on_update logging (below, and in
+                # train()) is completely unaffected either way.
+                reward_result = step_out.info.get("reward_result")
+                on_event(build_step_event(
+                    run_id=run_id, step=step_out.info["step_count"], episode=episode_index,
+                    update=update_index, target_id=str(reset_info["target"]), target_values=reset_info["target"],
+                    state_before=state, state_after=step_out.state,
+                    metrics_valid_mask=step_out.info["metrics_valid_mask"],
+                    action_choice=tuple(choices), action_deltas=env.action_deltas,
+                    indices_before=indices_before, indices_after=step_out.info["indices"],
+                    parameters_before=parameters_before, parameters_after=step_out.info["parameters"] or {},
+                    raw_metrics=step_out.info["metrics"],
+                    reward_components=reward_result.components if reward_result else {},
+                    reward_total=step_out.reward,
+                    strict_pass=reward_result.strict_target_pass if reward_result else None,
+                    failure_stage=step_out.info["failure_stage"],
+                    log_prob=log_prob, value_estimate=value,
+                    done=step_out.done, truncated=step_out.truncated,
+                    evaluation_count=step_out.info["total_evaluation_count"],
+                ))
             bootstrap_value = 0.0
             if step_out.truncated and not step_out.done:
                 # [NEBULA ADAPTATION -- repair #2] Horizon cutoff, not a
@@ -139,6 +178,8 @@ def train(
     minibatch_size: int = DEFAULT_MINIBATCH_SIZE,
     on_step: Callable[[dict[str, object]], None] | None = None,
     on_update: Callable[[dict[str, object]], None] | None = None,
+    on_event: Callable[[dict[str, object]], None] | None = None,
+    run_id: str = "",
 ) -> TrainResult:
     result = TrainResult()
     episode_index = 0
@@ -150,6 +191,9 @@ def train(
             episodes=episodes_per_update,
             episode_index_start=episode_index,
             on_step=on_step,
+            on_event=on_event,
+            run_id=run_id,
+            update_index=update_index,
         )
         episode_index += len(episode_logs)
         stats = agent.update(transitions, bootstrap_value, epochs=ppo_epochs, minibatch_size=minibatch_size)
@@ -177,4 +221,6 @@ def train(
         result.updates.append(update_row)
         if on_update is not None:
             on_update(update_row)
+        if on_event is not None:
+            on_event(build_update_event(run_id=run_id, update_row=update_row))
     return result

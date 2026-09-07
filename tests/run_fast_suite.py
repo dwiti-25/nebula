@@ -36,6 +36,14 @@ SPICE_FREE_MODULES = [
     "tests.test_artifact_integrity",
     "tests.test_performance_dashboard",
     "tests.test_web_ui",
+    "tests.test_broader_generalization_check",
+    "tests.test_rl_ppo_v2",
+    "tests.test_rl_checkpoint",
+    "tests.test_rl_events",
+    "tests.test_rl_ppo_v2_ablation",
+    "tests.test_evaluation_cache",
+    "tests.test_rl_runtime_efficiency_study",
+    "tests.test_phase7_rl_integration",
 ]
 
 

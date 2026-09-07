@@ -16,8 +16,13 @@ are used, read-only, exactly as experiments/*.py already does.
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import sys
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import torch
 
@@ -27,7 +32,14 @@ from simulator.rl_adapter import ACTION_BOUNDS, METRIC_OBSERVATION_NAMES, Receiv
 
 from rl.autockt_action import apply_action, indices_to_normalized_action
 from rl.autockt_env import AutoCktReceiverEnv, metrics_from_observation
-from rl.autockt_reward import FAILURE_REWARD, TERMINAL_BONUS, UNSATISFIED_THRESHOLD, autockt_reward
+from rl.autockt_reward import (
+    FAILURE_REWARD,
+    GRADED_NO_INFORMATION_FLOOR,
+    TERMINAL_BONUS,
+    UNSATISFIED_THRESHOLD,
+    autockt_reward,
+    graded_autockt_reward,
+)
 from rl.autockt_state import STATE_DIM, build_state, lookup, signed_relative_error
 from rl.parameter_grid import (
     ACTION_DELTAS, PARAMETER_NAMES, VERIFIED_INITIAL_PARAMETERS,
@@ -38,11 +50,14 @@ from rl.target_spec import EXISTING_THRESHOLDS, HARD_TARGET_THRESHOLDS, SPEC_NAM
 from rl.trainer import collect_rollout, train
 
 from experiments.train_autockt import (
-    _build_target_pools, _evaluate_checkpoint, _evaluate_validation_pool, _resolve_initial_indices,
+    _build_target_pools, _evaluate_checkpoint, _evaluate_validation_pool, _resolve_initial_indices, main,
 )
 
 
-def _fake_evaluation(success: bool = True, *, metrics: dict | None = None, identity: str = "fake") -> ReceiverEvaluation:
+def _fake_evaluation(
+    success: bool = True, *, metrics: dict | None = None, identity: str = "fake",
+    failure_stage: str | None = "dc",
+) -> ReceiverEvaluation:
     values = {name: 0.0 for name in METRIC_OBSERVATION_NAMES}
     values["dfe_locked_phase_eye_height_v"] = values.pop("dfe_eye_height_v")
     values.update(metrics or {})
@@ -50,7 +65,7 @@ def _fake_evaluation(success: bool = True, *, metrics: dict | None = None, ident
     return ReceiverEvaluation(
         success, ReceiverParameters(), SimulationConditions(),
         EvaluationFidelity.TRAINING, (stage,), values,
-        None if success else "dc", 0.0, identity, {},
+        None if success else failure_stage, 0.0, identity, {},
     )
 
 
@@ -366,6 +381,81 @@ class AutoCktRewardTests(unittest.TestCase):
         self.assertNotIn("reward_v1", dir(module))
 
 
+class GradedAutocktRewardTests(unittest.TestCase):
+    """PPO model-improvement study, improvement #1: a graded failure reward
+    that only grades failures where real per-spec information exists
+    (the `transient` stage), and falls back to a fixed, dominated floor
+    everywhere else -- mirroring experiments/train_cem.py's already-
+    validated graded_cem_fitness. autockt_reward itself (tested above) is
+    completely unchanged; these tests are strictly additive coverage.
+    """
+
+    def test_success_matches_autockt_reward_exactly(self):
+        target = TargetSpec.from_existing_thresholds()
+        self.assertEqual(
+            graded_autockt_reward(KNOWN_GOOD_METRICS, target, success=True, failure_stage=None),
+            autockt_reward(KNOWN_GOOD_METRICS, target, success=True),
+        )
+
+    def test_dc_failure_gets_the_fixed_no_information_floor(self):
+        target = TargetSpec.from_existing_thresholds()
+        reward = graded_autockt_reward({}, target, success=False, failure_stage="dc")
+        self.assertEqual(reward, GRADED_NO_INFORMATION_FLOOR)
+
+    def test_ac_and_ctle_transient_and_channel_failures_also_get_the_floor(self):
+        target = TargetSpec.from_existing_thresholds()
+        for stage in ("ac", "ctle_transient", "channel"):
+            with self.subTest(stage=stage):
+                reward = graded_autockt_reward({}, target, success=False, failure_stage=stage)
+                self.assertEqual(reward, GRADED_NO_INFORMATION_FLOOR)
+
+    def test_transient_failure_is_graded_by_real_distance_not_the_flat_floor(self):
+        # Note: dfe_min_margin_v's own threshold is exactly 0.0, and
+        # lookup(value, 0.0) == value/value == 1.0 for any nonzero value
+        # (verified directly) -- margin structurally cannot contribute
+        # negative/informative signal to this locked formula regardless of
+        # sign. Using dfe_locked_phase_eye_height_v instead, whose nonzero
+        # threshold (0.1) does not have this degeneracy.
+        target = TargetSpec.from_existing_thresholds()
+        close_metrics = dict(KNOWN_GOOD_METRICS)
+        close_metrics["dfe_locked_phase_eye_height_v"] = 0.05  # below the 0.1 threshold, but not by much
+        reward = graded_autockt_reward(close_metrics, target, success=False, failure_stage="transient")
+        self.assertNotEqual(reward, GRADED_NO_INFORMATION_FLOOR)
+        self.assertLess(reward, 0.0)  # still a failure -- never reaches TERMINAL_BONUS
+
+    def test_a_closer_transient_failure_scores_strictly_better_than_a_farther_one(self):
+        # This is the entire point of the fix: two DIFFERENT failing
+        # candidates must produce DIFFERENT rewards, unlike autockt_reward's
+        # flat FAILURE_REWARD for both.
+        target = TargetSpec.from_existing_thresholds()
+        close = dict(KNOWN_GOOD_METRICS)
+        close["dfe_locked_phase_eye_height_v"] = 0.05
+        far = dict(KNOWN_GOOD_METRICS)
+        far["dfe_locked_phase_eye_height_v"] = 0.001
+        far["ctle_power_w"] = 1.0
+        reward_close = graded_autockt_reward(close, target, success=False, failure_stage="transient")
+        reward_far = graded_autockt_reward(far, target, success=False, failure_stage="transient")
+        self.assertGreater(reward_close, reward_far)
+
+    def test_no_information_floor_is_always_strictly_below_any_graded_transient_score(self):
+        # Structural guarantee, not an empirical observation: a genuinely
+        # bad transient-stage failure must never be scored as if it were
+        # "no information" -- and a no-information failure must never
+        # accidentally outrank a real, close, graded failure.
+        target = TargetSpec.from_existing_thresholds()
+        worst_transient_metrics = {
+            "dfe_locked_phase_eye_height_v": 0.0, "dfe_eye_width_ui": 0.0,
+            "dfe_min_margin_v": -1.0, "ctle_power_w": 1.0,
+        }
+        worst_graded = graded_autockt_reward(worst_transient_metrics, target, success=False, failure_stage="transient")
+        self.assertLess(GRADED_NO_INFORMATION_FLOOR, worst_graded)
+
+    def test_never_reaches_terminal_bonus_on_failure(self):
+        target = TargetSpec.from_existing_thresholds()
+        reward = graded_autockt_reward(KNOWN_GOOD_METRICS, target, success=False, failure_stage="transient")
+        self.assertLess(reward, TERMINAL_BONUS)
+
+
 class AutoCktEnvTests(unittest.TestCase):
     def _make_env(self, evaluator, *, horizon=4, target=None, budget=50, seed=0):
         grids = build_parameter_grids()
@@ -473,6 +563,64 @@ class AutoCktEnvTests(unittest.TestCase):
         self.assertAlmostEqual(
             metrics["dfe_locked_phase_eye_height_v"], KNOWN_GOOD_METRICS["dfe_locked_phase_eye_height_v"]
         )
+
+
+class AutoCktEnvRewardFnPluggabilityTests(unittest.TestCase):
+    """PPO model-improvement study: AutoCktReceiverEnv's optional reward_fn
+    is the only way to opt into graded_autockt_reward -- default (omitted)
+    behavior must remain byte-for-byte autockt_reward, unchanged, so every
+    existing training-log result stays reproducible.
+    """
+
+    def _make_env(self, evaluator, *, horizon=4, reward_fn=None, seed=0):
+        grids = build_parameter_grids()
+        indices = verified_initial_indices(grids)
+        target_pool = (TargetSpec.from_existing_thresholds(),)
+        adapter = ReceiverRLAdapter(evaluator=evaluator, budget=RLBudget(50), seed=seed)
+        return AutoCktReceiverEnv(
+            target_pool=target_pool, initial_indices=indices, horizon=horizon,
+            adapter=adapter, grids=grids, seed=seed, reward_fn=reward_fn,
+        )
+
+    def test_default_reward_fn_matches_autockt_reward(self):
+        def evaluator(*args, **kwargs):
+            return _fake_evaluation(False, failure_stage="dc")
+
+        env = self._make_env(evaluator)  # reward_fn omitted
+        env.reset()
+        step_out = env.step([1, 1, 1, 1, 1])
+        self.assertEqual(step_out.reward, FAILURE_REWARD)
+
+    def test_graded_reward_fn_differentiates_dc_from_transient_failures(self):
+        def dc_evaluator(*args, **kwargs):
+            return _fake_evaluation(False, failure_stage="dc")
+
+        def transient_evaluator(*args, **kwargs):
+            close_metrics = dict(KNOWN_GOOD_METRICS)
+            close_metrics["dfe_locked_phase_eye_height_v"] = 0.05  # below the 0.1 threshold
+            return _fake_evaluation(False, metrics=close_metrics, failure_stage="transient")
+
+        dc_env = self._make_env(dc_evaluator, reward_fn=graded_autockt_reward)
+        dc_env.reset()
+        dc_reward = dc_env.step([1, 1, 1, 1, 1]).reward
+
+        transient_env = self._make_env(transient_evaluator, reward_fn=graded_autockt_reward)
+        transient_env.reset()
+        transient_reward = transient_env.step([1, 1, 1, 1, 1]).reward
+
+        self.assertEqual(dc_reward, GRADED_NO_INFORMATION_FLOOR)
+        self.assertNotEqual(transient_reward, GRADED_NO_INFORMATION_FLOOR)
+        self.assertGreater(transient_reward, dc_reward)
+
+    def test_graded_reward_fn_success_case_still_terminates_the_episode(self):
+        def evaluator(*args, **kwargs):
+            return _fake_evaluation(True, metrics=KNOWN_GOOD_METRICS)
+
+        env = self._make_env(evaluator, horizon=10, reward_fn=graded_autockt_reward)
+        env.reset()
+        step_out = env.step([1, 1, 1, 1, 1])
+        self.assertTrue(step_out.done)
+        self.assertEqual(step_out.reward, TERMINAL_BONUS)
 
 
 class AutoCktEnvInitialStateRandomizationTests(unittest.TestCase):
@@ -1054,6 +1202,51 @@ class MixedModeMilestoneTests(unittest.TestCase):
         self.assertEqual(rows[0]["target"], validation_pool[0].as_dict())
         # the evaluated target is genuinely absent from what training exposed the env to:
         self.assertNotIn(rows[0]["target"], [spec.as_dict() for spec in training_pool])
+
+
+class RewardModeCliTests(unittest.TestCase):
+    """--reward-mode wiring, exercised through the real CLI (--backend
+    synthetic, so SPICE-free) rather than just the underlying mechanism
+    (already covered by GradedAutocktRewardTests/
+    AutoCktEnvRewardFnPluggabilityTests above) -- catches a wiring mistake
+    (e.g. a typo in the flag name or a dropped reward_fn= pass-through)
+    that unit tests on the pieces alone would not.
+    """
+
+    def test_default_reward_mode_is_terminal_and_is_recorded_in_the_output(self):
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "run.jsonl"
+            argv = [
+                "train_autockt.py", "--backend", "synthetic", "--updates", "1",
+                "--episodes-per-update", "1", "--horizon", "1", "--seed", "1",
+                "--output", str(output),
+            ]
+            with patch("sys.argv", argv):
+                rc = main()
+            self.assertEqual(rc, 0)
+            self.assertTrue(output.is_file())
+
+    def test_graded_reward_mode_runs_end_to_end_via_the_cli(self):
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "run.jsonl"
+            argv = [
+                "train_autockt.py", "--backend", "synthetic", "--updates", "1",
+                "--episodes-per-update", "1", "--horizon", "1", "--seed", "1",
+                "--reward-mode", "graded", "--output", str(output),
+            ]
+            with patch("sys.argv", argv):
+                rc = main()
+            self.assertEqual(rc, 0)
+            self.assertTrue(output.is_file())
+            rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertIn("reward_version", rows[0])
+
+    def test_invalid_reward_mode_is_rejected(self):
+        argv = ["train_autockt.py", "--backend", "synthetic", "--reward-mode", "bogus",
+                "--output", "results/does_not_matter.jsonl"]
+        with patch("sys.argv", argv):
+            with self.assertRaises(SystemExit):
+                main()
 
 
 if __name__ == "__main__":

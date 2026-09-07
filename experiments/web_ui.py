@@ -55,6 +55,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from analysis.performance_dashboard import build_dashboard
 from analysis.artifact_store import packaged_file_exists
+from analysis.plot_renderer import render_chart
+from analysis.run_evidence import build_run_dashboard
 
 RUNS_DIR = PROJECT_ROOT / "results" / "web_ui_runs"
 HOST = "127.0.0.1"  # localhost-only default -- pass --host to expose beyond this machine
@@ -78,6 +80,7 @@ _RUNS_LOCK = threading.Lock()
 
 TARGET_MODES = ("trivial", "hard", "custom")
 BACKENDS = ("synthetic", "real")
+RL_VERSIONS = ("v1", "v2")
 # Kept as a plain string tuple (not imported from experiments.run_autockt_
 # pipeline) so this server never has to import torch/simulator/rl at
 # startup -- see the module docstring's design note. Cross-checked against
@@ -112,6 +115,8 @@ def _validate_request(payload: dict[str, Any]) -> list[str]:
                 problems.append(f"target.{field} must be a number")
     if payload.get("backend") not in BACKENDS:
         problems.append(f"backend must be one of {BACKENDS}")
+    if payload.get("rl_version", "v1") not in RL_VERSIONS:
+        problems.append(f"rl_version must be one of {RL_VERSIONS}")
     try:
         episodes = int(payload.get("episodes", 0))
         if episodes < 1:
@@ -146,6 +151,7 @@ def _build_argv(payload: dict[str, Any], *, output_path: Path, schematic_path: P
     argv = [
         sys.executable, "-m", "experiments.run_autockt_pipeline",
         "--backend", payload["backend"],
+        "--rl-version", payload.get("rl_version", "v1"),
         "--episodes", str(int(payload["episodes"])),
         "--horizon", str(int(payload["horizon"])),
         "--initial-indices-source", payload.get("initial_indices_source", "verified"),
@@ -162,6 +168,8 @@ def _build_argv(payload: dict[str, Any], *, output_path: Path, schematic_path: P
         argv += ["--checkpoint", payload["checkpoint"]]
     if payload.get("measure_hd3_noise"):
         argv += ["--measure-hd3-noise"]
+    if payload.get("evaluation_cache"):
+        argv += ["--evaluation-cache"]
     return argv
 
 
@@ -180,11 +188,121 @@ def _estimate_timeout_s(payload: dict[str, Any]) -> float:
     episodes = max(1, int(payload.get("episodes", 1)))
     return MINIMAL27_FIXED_OVERHEAD_S + episodes * MINIMAL27_PER_CANDIDATE_S
 
+# ---------------------------------------------------------------------------
+# PVT progress parsing ("Add visible PVT progress to web UI"): the pipeline
+# subprocess (experiments/run_autockt_pipeline.py::_pvt_progress_evaluator)
+# prints one flush=True JSON line per PVT (design, condition) pair to its
+# own stdout -- the SAME stream this server already captures, no new IPC.
+# These two functions are pure (no I/O, no locking) so they are testable
+# directly with plain strings/dicts, independent of subprocess plumbing.
+# ---------------------------------------------------------------------------
+
+_PROGRESS_EVENT_KEY = "nebula_progress_event"
+
+
+def _parse_progress_line(line: str) -> Optional[dict[str, Any]]:
+    """Best-effort parse of one stdout line as a pipeline progress event.
+    Never raises: any blank, non-JSON, non-object, or unrecognized line is
+    simply not a progress event (None) -- malformed or missing pipeline
+    output can never break a run (requirement: fall back gracefully)."""
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        event = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(event, dict) or _PROGRESS_EVENT_KEY not in event:
+        return None
+    return event
+
+
+def _apply_progress_event(entry: dict[str, Any], event: dict[str, Any]) -> None:
+    """Mutates one _RUNS entry in place from one parsed progress event.
+    Caller must hold _RUNS_LOCK.
+    """
+    kind = event.get(_PROGRESS_EVENT_KEY)
+    if kind == "candidate_generation_complete":
+        total = event.get("pvt_conditions_total") or 0
+        if total:
+            entry["pvt_conditions_total"] = total
+            entry["pvt_conditions_completed"] = 0
+        # total == 0 means pvt_conditions_set == "none" (or zero feasible
+        # candidates) -- leave every pvt_* field at its default (None), so
+        # a "none" run never shows misleading PVT progress.
+    elif kind == "pvt_condition_start":
+        entry["pvt_current_corner"] = event.get("corner")
+        entry["pvt_current_temperature_c"] = event.get("temperature_c")
+        entry["pvt_current_supply_v"] = event.get("supply_v")
+    elif kind == "pvt_condition_complete":
+        # Only a definitively finished (successful or failed) condition
+        # advances the count -- a "start" event above never does.
+        if entry.get("pvt_conditions_completed") is not None:
+            entry["pvt_conditions_completed"] += 1
+        entry["pvt_current_corner"] = event.get("corner")
+        entry["pvt_current_temperature_c"] = event.get("temperature_c")
+        entry["pvt_current_supply_v"] = event.get("supply_v")
+    # any other/unrecognized event kind is ignored, not an error.
+
+
+def _consume_stdout_line(run_id: str, line: str) -> None:
+    event = _parse_progress_line(line)
+    if event is None:
+        return
+    with _RUNS_LOCK:
+        entry = _RUNS.get(run_id)
+        if entry is not None:
+            _apply_progress_event(entry, event)
+
+
+def _drain_subprocess_with_progress(
+    proc: "subprocess.Popen[bytes]", run_id: str, deadline: float,
+) -> tuple[str, str, bool]:
+    """Drain both child pipes concurrently and apply stdout progress events.
+
+    Reader threads work for Windows pipe handles as well as POSIX file
+    descriptors, while ensuring neither child pipe can fill and deadlock.
+    """
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+
+    def read_stream(stream, chunks: list[bytes], *, progress: bool) -> None:
+        if stream is None:
+            return
+        for chunk in iter(stream.readline, b""):
+            chunks.append(chunk)
+            if progress:
+                _consume_stdout_line(run_id, chunk.decode("utf-8", errors="replace"))
+
+    readers = [
+        threading.Thread(target=read_stream, args=(proc.stdout, stdout_chunks),
+                         kwargs={"progress": True}, daemon=True),
+        threading.Thread(target=read_stream, args=(proc.stderr, stderr_chunks),
+                         kwargs={"progress": False}, daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    try:
+        proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    if not timed_out:
+        for reader in readers:
+            reader.join(timeout=2.0)
+
+    return (
+        b"".join(stdout_chunks).decode("utf-8", errors="replace"),
+        b"".join(stderr_chunks).decode("utf-8", errors="replace"),
+        timed_out,
+    )
+
 
 def _execute_run(
     run_id: str, argv: list[str], output_path: Path, schematic_path: Path,
-    timeout_s: float = RUN_TIMEOUT_S,
+    timeout_s: Optional[float] = None,
 ) -> None:
+    timeout_s = RUN_TIMEOUT_S if timeout_s is None else timeout_s
     with _RUNS_LOCK:
         _RUNS[run_id]["status"] = "running"
         _RUNS[run_id]["started_at"] = time.monotonic()
@@ -192,16 +310,18 @@ def _execute_run(
     timed_out = False
     try:
         proc = subprocess.Popen(
-            argv, cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            argv, cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout_s)
-            returncode = proc.returncode
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        deadline = time.monotonic() + timeout_s
+        stdout, stderr, timed_out = _drain_subprocess_with_progress(proc, run_id, deadline)
+        if timed_out:
             proc.kill()
-            stdout, stderr = proc.communicate()  # reap the now-terminated process, collect whatever it wrote
-            returncode = proc.returncode
+            proc.wait()  # reader threads drain the closed pipes after termination
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
+        returncode = proc.returncode
         launch_error: Optional[str] = None
     except OSError as exc:
         stdout, stderr, returncode = "", "", None
@@ -233,10 +353,10 @@ def _execute_run(
             except (OSError, json.JSONDecodeError) as exc:
                 entry["status"] = "failed"
                 entry["error"] = f"pipeline exited cleanly but its output file could not be read: {exc}"
-        elif returncode is not None and returncode < 0:
+        elif returncode is not None and (returncode < 0 or returncode == 11):
             entry["status"] = "failed"
             entry["error"] = (
-                f"the pipeline subprocess was terminated by signal {-returncode} "
+                f"the pipeline subprocess was terminated by signal {abs(returncode)} "
                 f"(e.g. 11 = SIGSEGV) -- a native-level crash, not a Python error. "
                 "This can occur intermittently during real-SPICE runs; see "
                 "docs/autockt-mapping.md sec 23 for the investigation. See the "
@@ -263,6 +383,9 @@ def _start_run(payload: dict[str, Any]) -> str:
             "started_at": None, "finished_at": None, "returncode": None,
             "timeout_s": timeout_s,
             "error": None, "result": None, "stdout_tail": "", "stderr_tail": "",
+            "pvt_condition_set": payload.get("pvt_condition_set"),
+            "pvt_conditions_total": None, "pvt_conditions_completed": None,
+            "pvt_current_corner": None, "pvt_current_temperature_c": None, "pvt_current_supply_v": None,
         }
 
     thread = threading.Thread(
@@ -294,6 +417,27 @@ def _status_payload(run_id: str) -> Optional[dict[str, Any]]:
     }
     if entry["result"] is not None and entry["result"].get("schematic_path"):
         payload["schematic_path"] = entry["result"]["schematic_path"]
+
+    # PVT progress fields -- included only "when available" (requirement
+    # 1): a "none" PVT run, or one where the pipeline hasn't yet reported
+    # candidate_generation_complete, never sets pvt_conditions_total, so
+    # none of this appears and the UI shows only the generic running state
+    # (requirement 6/9).
+    total = entry.get("pvt_conditions_total")
+    if total:
+        completed = entry.get("pvt_conditions_completed") or 0
+        payload["pvt_conditions_total"] = total
+        payload["pvt_conditions_completed"] = completed
+        payload["pvt_progress_fraction"] = round(completed / total, 4)
+        if entry.get("pvt_current_corner") is not None:
+            payload["pvt_current_corner"] = entry["pvt_current_corner"]
+            payload["pvt_current_temperature_c"] = entry["pvt_current_temperature_c"]
+            payload["pvt_current_supply_v"] = entry["pvt_current_supply_v"]
+    if entry.get("pvt_condition_set") == "minimal27":
+        # Full 27-point sweep: no ETA (none of this is based on measured
+        # data), just an explicit "this is long-running" label.
+        payload["pvt_long_running_full_sweep"] = True
+
     return payload
 
 
@@ -334,6 +478,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_bytes(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=300")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:  # noqa: N802 (stdlib method name)
         path = urlparse(self.path).path
         if path == "/":
@@ -342,6 +494,42 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"checkpoints": _available_checkpoints()})
         elif path == "/api/evidence":
             self._send_json(200, build_dashboard(PROJECT_ROOT))
+        elif path == "/api/evidence/runs":
+            self._send_json(200, {"runs": sorted(p.stem.removesuffix(".events")
+                                                  for p in RUNS_DIR.glob("*.events.jsonl"))})
+        elif path.startswith("/api/evidence/"):
+            run_id = path[len("/api/evidence/"):]
+            if not _RUN_ID_RE.match(run_id):
+                self._send_json(400, {"error": "invalid run_id"})
+                return
+            evidence = build_run_dashboard(RUNS_DIR / f"{run_id}.events.jsonl")
+            if not evidence["events"]:
+                self._send_json(404, {"error": "no event evidence for this run"})
+                return
+            self._send_json(200, evidence)
+        elif re.fullmatch(r"/api/plot/[0-9a-f]{32}/[a-z0-9_-]+\.(svg|png)", path):
+            _, _, _, run_id, filename = path.split("/")
+            plot_id, format = filename.rsplit(".", 1)
+            evidence = build_run_dashboard(RUNS_DIR / f"{run_id}.events.jsonl")
+            chart = next((item for item in evidence["charts"] if item.get("id") == plot_id), None)
+            if chart is None:
+                self._send_json(404, {"error": "unknown run plot"})
+                return
+            self._send_bytes(200, render_chart(chart, format=format),
+                             "image/svg+xml" if format == "svg" else "image/png")
+        elif path.startswith("/api/plot/"):
+            name = path[len("/api/plot/"):]
+            if not re.fullmatch(r"[a-z0-9_-]+\.(svg|png)", name):
+                self._send_json(400, {"error": "invalid plot id"})
+                return
+            plot_id, format = name.rsplit(".", 1)
+            dashboard = build_dashboard(PROJECT_ROOT)
+            chart = next((item for item in dashboard["charts"] if item.get("id") == plot_id), None)
+            if chart is None:
+                self._send_json(404, {"error": "unknown plot"})
+                return
+            body = render_chart(chart, format=format)
+            self._send_bytes(200, body, "image/svg+xml" if format == "svg" else "image/png")
         elif path.startswith("/api/status/"):
             run_id = path[len("/api/status/"):]
             if not _RUN_ID_RE.match(run_id):
@@ -448,7 +636,7 @@ INDEX_HTML = r"""<!doctype html>
   .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
   .chart { background:#0d1117; border:1px solid var(--border); border-radius:8px; padding:10px; min-height:245px; }
   .chart h3 { font-size:12px; margin:0 0 6px; color:var(--text); }
-  .chart svg { width:100%; height:180px; overflow:visible; }
+  .chart img { width:100%; min-height:220px; background:white; border-radius:5px; }
   .chart-note { color:var(--muted); font-size:10.5px; margin-top:5px; }
   .axis-label { fill:var(--muted); font-size:9px; }
   .evidence-meta { color:var(--muted); font-size:11px; margin-top:10px; }
@@ -491,6 +679,15 @@ INDEX_HTML = r"""<!doctype html>
       </select>
       <label for="checkpoint">PPO checkpoint</label>
       <select id="checkpoint"><option value="">(untrained policy -- synthetic backend only)</option></select>
+      <label for="rlVersion">PPO version</label>
+      <select id="rlVersion">
+        <option value="v1">PPO v1 — historical baseline</option>
+        <option value="v2">PPO v2 — corrected reset + validity state + reward v2</option>
+      </select>
+      <label style="display:flex; align-items:center; gap:8px; margin-top:12px; cursor:pointer">
+        <input id="evaluationCache" type="checkbox" style="width:auto">
+        <span style="margin:0">Reuse exact repeated evaluations</span>
+      </label>
       <div class="row">
         <div>
           <label for="episodes">Episodes</label>
@@ -537,7 +734,7 @@ INDEX_HTML = r"""<!doctype html>
     </fieldset>
 
     <button id="runBtn">Run NEBULA</button>
-    <div id="statusLine"><span id="statusBadge" class="status-badge status-idle">idle</span><span id="elapsed"></span></div>
+    <div id="statusLine"><span id="statusBadge" class="status-badge status-idle">idle</span><span id="elapsed"></span><span id="pvtProgress"></span></div>
   </div>
 
   <div class="panel">
@@ -600,59 +797,17 @@ fetch('/api/checkpoints').then(r => r.json()).then(data => {
   if (data.checkpoints.length) sel.value = data.checkpoints[0];
 });
 
-function svgFrame(title) {
-  const box = document.createElement('div'); box.className = 'chart';
-  const h = document.createElement('h3'); h.textContent = title; box.appendChild(h);
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', '0 0 320 180'); box.appendChild(svg);
-  return [box, svg];
-}
-
-function addSvg(svg, tag, attrs, text='') {
-  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
-  for (const [k,v] of Object.entries(attrs)) el.setAttribute(k, v);
-  if (text) el.textContent = text; svg.appendChild(el); return el;
-}
-
 function renderChart(chart) {
-  const [box, svg] = svgFrame(chart.title);
-  const left=38, top=10, width=266, height=138;
-  addSvg(svg,'line',{x1:left,y1:top,x2:left,y2:top+height,stroke:'#53606d'});
-  addSvg(svg,'line',{x1:left,y1:top+height,x2:left+width,y2:top+height,stroke:'#53606d'});
-  if (chart.type === 'line') {
-    const values = chart.series[0].values.map(Number);
-    const min = Math.min(0,...values), max = Math.max(1,...values), span = max-min || 1;
-    const pts = values.map((v,i) => `${left+(i/Math.max(1,values.length-1))*width},${top+height-(v-min)/span*height}`).join(' ');
-    addSvg(svg,'polyline',{points:pts,fill:'none',stroke:'#4fd1c5','stroke-width':'2'});
-    addSvg(svg,'text',{x:2,y:top+8,class:'axis-label'},max.toFixed(2));
-    addSvg(svg,'text',{x:2,y:top+height,class:'axis-label'},min.toFixed(2));
-  } else if (chart.type === 'bar') {
-    const values = chart.values.map(v => Number(v || 0)); const max = Math.max(1,...values);
-    const slot = width/Math.max(1,values.length);
-    values.forEach((v,i) => {
-      const h=v/max*height, x=left+i*slot+5;
-      addSvg(svg,'rect',{x,y:top+height-h,width:Math.max(5,slot-10),height:h,fill:'#4fd1c5'});
-      addSvg(svg,'text',{x:x+(slot-10)/2,y:top+height+12,'text-anchor':'middle',class:'axis-label'},String(chart.categories[i]).slice(0,12));
-      addSvg(svg,'text',{x:x+(slot-10)/2,y:top+height-h-3,'text-anchor':'middle',class:'axis-label'},v.toFixed(v<1?2:0));
-    });
-  } else if (chart.type === 'scatter') {
-    const xs=chart.points.map(p=>p.x), ys=chart.points.map(p=>p.y);
-    const xmin=Math.min(...xs), xmax=Math.max(...xs), ymin=Math.min(...ys), ymax=Math.max(...ys);
-    chart.points.forEach(p => {
-      const x=left+(p.x-xmin)/(xmax-xmin||1)*width, y=top+height-(p.y-ymin)/(ymax-ymin||1)*height;
-      const dot=addSvg(svg,'circle',{cx:x,cy:y,r:4,fill:'#4fd1c5'}); dot.appendChild(document.createElementNS('http://www.w3.org/2000/svg','title')).textContent=p.label;
-    });
-  } else if (chart.type === 'heatmap') {
-    const cols=chart.columns.length, rows=chart.rows.length, cw=width/cols, rh=height/rows;
-    chart.cells.forEach(cell => {
-      const ci=chart.conditions.findIndex(c=>Number(c[0])===cell.supply_v && Number(c[1])===cell.temperature_c);
-      const ri=chart.rows.indexOf(cell.process); if (ci<0 || ri<0) return;
-      const rect=addSvg(svg,'rect',{x:left+ci*cw,y:top+ri*rh,width:cw-1,height:rh-1,fill:cell.passed?'#3fb950':'#f85149'});
-      rect.appendChild(document.createElementNS('http://www.w3.org/2000/svg','title')).textContent=`${cell.process} ${cell.supply_v}V ${cell.temperature_c}C`;
-    });
-  }
-  addSvg(svg,'text',{x:left+width/2,y:176,'text-anchor':'middle',class:'axis-label'},chart.x_label || 'condition');
-  if (chart.note) { const note=document.createElement('div'); note.className='chart-note'; note.textContent=chart.note; box.appendChild(note); }
+  const box = document.createElement('div'); box.className = 'chart';
+  const h = document.createElement('h3'); h.textContent = chart.title; box.appendChild(h);
+  const image = document.createElement('img');
+  image.src = `/api/plot/${encodeURIComponent(chart.id)}.svg`;
+  image.alt = chart.note || `${chart.title}; ${chart.x_label || ''} by ${chart.y_label || ''}`;
+  image.loading = 'lazy'; box.appendChild(image);
+  const links = document.createElement('div'); links.className = 'chart-note';
+  links.innerHTML = `<a href="/api/plot/${encodeURIComponent(chart.id)}.svg" download>SVG</a> · `+
+                    `<a href="/api/plot/${encodeURIComponent(chart.id)}.png" download>PNG</a>`;
+  box.appendChild(links);
   return box;
 }
 
@@ -679,6 +834,8 @@ function buildPayload() {
   const payload = {
     target_mode: targetMode,
     backend: $('backend').value,
+    rl_version: $('rlVersion').value,
+    evaluation_cache: $('evaluationCache').checked,
     checkpoint: $('checkpoint').value || null,
     episodes: parseInt($('episodes').value, 10),
     horizon: parseInt($('horizon').value, 10),
@@ -752,6 +909,7 @@ function renderResult(payload) {
     `<div><div class="k">Candidates generated</div><div class="v">${result.n_candidates_generated}</div></div>` +
     `<div><div class="k">Nominally feasible</div><div class="v">${result.n_nominally_feasible}</div></div>` +
     `<div><div class="k">Backend</div><div class="v">${result.backend}</div></div>` +
+    `<div><div class="k">PPO version</div><div class="v">${result.rl_version || 'v1'}</div></div>` +
     `<div><div class="k">Elapsed</div><div class="v">${payload.elapsed_s}s</div></div>`;
 
   $('schematicLink').onclick = (e) => {
@@ -774,10 +932,24 @@ function showJson(result) {
   view.style.display = 'block';
 }
 
+function pvtProgressText(payload) {
+  if (!payload.pvt_conditions_total) return '';
+  let text = ` — PVT evaluation: ${payload.pvt_conditions_completed} / ${payload.pvt_conditions_total} conditions`;
+  if (payload.pvt_current_corner) {
+    text += ` (currently: ${payload.pvt_current_corner.toUpperCase()} / ` +
+            `${payload.pvt_current_temperature_c}°C / ${payload.pvt_current_supply_v}V)`;
+  }
+  if (payload.pvt_long_running_full_sweep) {
+    text += ' — full 27-point sweep, long-running';
+  }
+  return text;
+}
+
 function poll(runId) {
   fetch(`/api/status/${runId}`).then(r => r.json()).then(payload => {
     setBadge(payload.status);
     $('elapsed').textContent = payload.elapsed_s + 's elapsed';
+    $('pvtProgress').textContent = pvtProgressText(payload);
     if (payload.status === 'running' || payload.status === 'queued') {
       pollTimer = setTimeout(() => poll(runId), 1200);
       return;
@@ -804,6 +976,7 @@ $('runBtn').addEventListener('click', () => {
   $('runBtn').disabled = true;
   setBadge('queued');
   $('elapsed').textContent = '';
+  $('pvtProgress').textContent = '';
 
   fetch('/api/run', {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildPayload()),

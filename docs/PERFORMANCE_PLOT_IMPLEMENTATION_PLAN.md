@@ -206,3 +206,12 @@ RL training to replace the existing seven charts. P4 becomes authoritative only
 after controlled multi-seed records exist; until then the UI must retain the
 current descriptive caveats.
 
+## Integration status (2026-09-07)
+
+- P1 complete: `analysis.plot_renderer` uses figure-local Matplotlib SVG/PNG canvases and an evidence-hash/style cache.
+- P2 complete for all seven archived-evidence charts: the UI loads rendered endpoints and offers SVG/PNG downloads.
+- P3 foundation complete: Teammate B's typed hook is connected to append-only, flushed JSONL; strict assessments and per-run evidence/plot endpoints are implemented.
+- P4 statistical primitives complete: IQM, bootstrap intervals, performance profiles, and probability of improvement are available. Inferential UI plots remain disabled until matched independent multi-seed real records exist.
+- P5 partially complete: responsive figures, accessible alternative text, downloads, provenance, and offline rendering are present. A richer multi-run selector and report bundle remain presentation polish.
+
+No absent historical field is reconstructed. PPO v1/v2 raw rewards remain separate because their reward scales differ.

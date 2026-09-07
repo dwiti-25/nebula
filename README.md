@@ -324,6 +324,31 @@ original handoff netlists. New optimization and RL work should use
 `evaluate_receiver` so it receives the hierarchical tests, 100 MHz peaking
 reference, channel/DFE metrics, early stopping, and evaluation fingerprints.
 
+## PVT condition modes (`experiments/run_autockt_pipeline.py --pvt-condition-set`)
+
+Also selectable from the local web UI (`experiments/web_ui.py`). Three modes:
+
+| Mode | Conditions | Fidelity | What it establishes |
+|---|---|---|---|
+| `none` (default) | none — nominal only (TT / 27 °C / 1.8 V) | n/a | Nothing about PVT robustness; the selected design is only validated at nominal conditions. |
+| `smoke` | 2 — nominal (TT / 27 °C / 1.8 V) + one stress corner (FF / 125 °C / 1.71 V) | `EvaluationFidelity.CANDIDATE` | A quick PVT screening/debug check that exercises the PVT-aware selection pathway with real SPICE. **It does not establish full PVT robustness** — it is not a substitute for the full sweep. |
+| full 27-point sweep (`minimal27`) | 27 — the TT/SS/FF × VDD±5% × 0–125 °C set from `experiments/pvt_sweep.py` | `EvaluationFidelity.FINAL` | The actual PVT robustness validation. Slow (tens of minutes to hours depending on how many candidates reach this stage) and never run automatically. |
+
+`smoke` uses `CANDIDATE` fidelity rather than `FINAL` because PVT selection
+(`analysis/pvt_selection.py`) only ever reads each evaluation's
+success/failure outcome, never its metric values — `CANDIDATE` runs the
+identical evaluation stages `FINAL` does, just without `FINAL`'s extra
+HD3 characterization sweep, which PVT selection never uses anyway.
+
+For any mode that spends real SPICE time on PVT (`smoke` or the full
+sweep), the web UI shows live progress once a run is under way — completed
+vs. total condition evaluations (e.g. "PVT evaluation: 1 / 2 conditions"),
+and the current condition being evaluated, when that information is
+available from the pipeline's own output. A `none` run never shows PVT
+progress, since it never evaluates any PVT condition. No estimated
+completion time is shown for the full sweep — only that it is a
+long-running, full 27-point evaluation.
+
 ## Tests
 
 ```powershell
@@ -558,8 +583,9 @@ a remaining performance enhancement, not a reward-correctness prerequisite.
 
 ## Project boundaries
 
-This integration now provides the adapter contract but deliberately stops
-before selecting or training a reinforcement-learning algorithm. Full Stage 2 work still
+This integration provides both the preserved PPO v1 baseline and the opt-in
+PPO v2 configuration. Select them with `--rl-version v1|v2` in the pipeline
+or training CLI, or with the version selector in the browser UI. Full Stage 2 work still
 includes a physical bias/tail source, sampler and DFE, MOS sizing groups,
 parasitics, and layout-grounded area/power. The complete decision and
 deferred-work ledger is in `docs/stage1-decisions.md`.
@@ -623,3 +649,10 @@ for the preserved implementation order, performance-display semantics,
 reviewed Stage-2 deferrals, and remaining qualification work. The
 research-backed Matplotlib migration and performance-plot roadmap is in
 [`docs/PERFORMANCE_PLOT_IMPLEMENTATION_PLAN.md`](docs/PERFORMANCE_PLOT_IMPLEMENTATION_PLAN.md).
+
+PPO v1 and v2 are deliberately reported separately. Their reward scales are
+not directly comparable, so strict target success, normalized target margins,
+simulator evaluations, failures, and runtime are the common comparison axes.
+New training runs emit append-only `.events.jsonl` records and can export both
+inference-only and resumable checkpoints. Dashboard plots are rendered through
+Matplotlib as downloadable SVG or PNG rather than browser-drawn approximations.
