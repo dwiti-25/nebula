@@ -13,6 +13,8 @@ reliably reproducible on demand, so it is simulated here deterministically.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import threading
 import unittest
 import urllib.error
@@ -124,50 +126,57 @@ class BuildArgvTests(unittest.TestCase):
 
 class ExecuteRunCrashHandlingTests(unittest.TestCase):
     """Simulates the real, intermittent SIGSEGV documented in
-    docs/autockt-mapping.md sec 23 deterministically, via a mocked
-    subprocess.Popen -- so this test does not depend on the crash actually
-    occurring, and runs with zero real SPICE.
+    docs/autockt-mapping.md sec 23 deterministically, via a real short-
+    lived subprocess that signals itself -- so this test does not depend
+    on the crash actually occurring in the real pipeline, and runs with
+    zero real SPICE. Uses real subprocesses (not a mocked
+    subprocess.Popen) because _execute_run now reads proc.stdout/stderr
+    via select.select, which requires real OS-backed pipe file
+    descriptors that a MagicMock cannot provide.
     """
 
     def test_signal_terminated_subprocess_is_reported_clearly_not_as_a_hang(self):
         run_id = "testrun_crash_00000000000000"
         with web_ui._RUNS_LOCK:
             web_ui._RUNS[run_id] = {
-                "run_id": run_id, "status": "queued", "command": ["python", "-m", "x"],
+                "run_id": run_id, "status": "queued", "command": ["x"],
                 "output_path": "/tmp/nope.json", "schematic_path": "/tmp/nope.spice",
                 "started_at": None, "finished_at": None, "returncode": None,
                 "error": None, "result": None, "stdout_tail": "", "stderr_tail": "",
             }
-        mock_proc = MagicMock()
-        mock_proc.communicate.return_value = ("partial stdout before crash", "")
-        mock_proc.returncode = -11  # SIGSEGV, as subprocess.Popen reports on POSIX
-        with patch("experiments.web_ui.subprocess.Popen", return_value=mock_proc):
-            web_ui._execute_run(run_id, ["python", "-m", "x"], Path("/tmp/nope.json"), Path("/tmp/nope.spice"))
+        argv = [
+            sys.executable, "-c",
+            "import os, signal, sys; print('partial stdout before crash'); "
+            "sys.stdout.flush(); os.kill(os.getpid(), signal.SIGSEGV)",
+        ]
+        web_ui._execute_run(run_id, argv, Path("/tmp/nope.json"), Path("/tmp/nope.spice"))
 
         payload = web_ui._status_payload(run_id)
         self.assertEqual(payload["status"], "failed")
         self.assertIn("signal 11", payload["error"])
         self.assertIn("SIGSEGV", payload["error"])
+        self.assertIn("partial stdout before crash", payload["stdout_tail"])
 
     def test_nonzero_exit_without_signal_is_reported_as_a_normal_failure(self):
         run_id = "testrun_fail_000000000000000"
         with web_ui._RUNS_LOCK:
             web_ui._RUNS[run_id] = {
-                "run_id": run_id, "status": "queued", "command": ["python", "-m", "x"],
+                "run_id": run_id, "status": "queued", "command": ["x"],
                 "output_path": "/tmp/nope2.json", "schematic_path": "/tmp/nope2.spice",
                 "started_at": None, "finished_at": None, "returncode": None,
                 "error": None, "result": None, "stdout_tail": "", "stderr_tail": "",
             }
-        mock_proc = MagicMock()
-        mock_proc.communicate.return_value = ("", "ValueError: invalid target specification")
-        mock_proc.returncode = 1
-        with patch("experiments.web_ui.subprocess.Popen", return_value=mock_proc):
-            web_ui._execute_run(run_id, ["python", "-m", "x"], Path("/tmp/nope2.json"), Path("/tmp/nope2.spice"))
+        argv = [
+            sys.executable, "-c",
+            "import sys; sys.stderr.write('ValueError: invalid target specification'); sys.exit(1)",
+        ]
+        web_ui._execute_run(run_id, argv, Path("/tmp/nope2.json"), Path("/tmp/nope2.spice"))
 
         payload = web_ui._status_payload(run_id)
         self.assertEqual(payload["status"], "failed")
         self.assertNotIn("signal", payload["error"])
         self.assertIn("non-zero status (1)", payload["error"])
+        self.assertIn("ValueError: invalid target specification", payload["stderr_tail"])
 
 
 class CliArgsTests(unittest.TestCase):
@@ -271,28 +280,22 @@ class SubprocessTimeoutTests(unittest.TestCase):
     """
 
     def test_hung_subprocess_is_killed_and_reported_as_a_timeout(self):
-        import subprocess as subprocess_module
-
         run_id = "testrun_timeout_0000000000000"
         with web_ui._RUNS_LOCK:
             web_ui._RUNS[run_id] = {
-                "run_id": run_id, "status": "queued", "command": ["python", "-m", "x"],
+                "run_id": run_id, "status": "queued", "command": ["x"],
                 "output_path": "/tmp/nope3.json", "schematic_path": "/tmp/nope3.spice",
                 "started_at": None, "finished_at": None, "returncode": None,
                 "error": None, "result": None, "stdout_tail": "", "stderr_tail": "",
             }
-
-        mock_proc = MagicMock()
-        mock_proc.communicate.side_effect = [
-            subprocess_module.TimeoutExpired(cmd="x", timeout=web_ui.RUN_TIMEOUT_S),
-            ("partial output before the hang was killed", ""),
+        argv = [
+            sys.executable, "-c",
+            "import sys, time; print('partial output before the hang was killed'); "
+            "sys.stdout.flush(); time.sleep(30)",
         ]
-        mock_proc.returncode = -9  # SIGKILL, after proc.kill()
+        with patch.object(web_ui, "RUN_TIMEOUT_S", 0.3):
+            web_ui._execute_run(run_id, argv, Path("/tmp/nope3.json"), Path("/tmp/nope3.spice"))
 
-        with patch("experiments.web_ui.subprocess.Popen", return_value=mock_proc):
-            web_ui._execute_run(run_id, ["python", "-m", "x"], Path("/tmp/nope3.json"), Path("/tmp/nope3.spice"))
-
-        mock_proc.kill.assert_called_once()
         payload = web_ui._status_payload(run_id)
         self.assertEqual(payload["status"], "failed")
         self.assertIn("did not finish within", payload["error"])
@@ -303,17 +306,262 @@ class SubprocessTimeoutTests(unittest.TestCase):
         run_id = "testrun_normal_00000000000000"
         with web_ui._RUNS_LOCK:
             web_ui._RUNS[run_id] = {
-                "run_id": run_id, "status": "queued", "command": ["python", "-m", "x"],
+                "run_id": run_id, "status": "queued", "command": ["x"],
                 "output_path": "/tmp/nope4.json", "schematic_path": "/tmp/nope4.spice",
                 "started_at": None, "finished_at": None, "returncode": None,
                 "error": None, "result": None, "stdout_tail": "", "stderr_tail": "",
             }
-        mock_proc = MagicMock()
-        mock_proc.communicate.return_value = ("", "")
-        mock_proc.returncode = 1
-        with patch("experiments.web_ui.subprocess.Popen", return_value=mock_proc):
-            web_ui._execute_run(run_id, ["python", "-m", "x"], Path("/tmp/nope4.json"), Path("/tmp/nope4.spice"))
-        mock_proc.kill.assert_not_called()
+        argv = [sys.executable, "-c", "import sys; sys.exit(1)"]
+        with patch.object(subprocess.Popen, "kill") as mock_kill:
+            web_ui._execute_run(run_id, argv, Path("/tmp/nope4.json"), Path("/tmp/nope4.spice"))
+        mock_kill.assert_not_called()
+
+
+class ParseProgressLineTests(unittest.TestCase):
+    """Pure-function tests for _parse_progress_line -- no subprocess, no
+    locking. Must never raise, regardless of input.
+    """
+
+    def test_valid_progress_json_is_parsed(self):
+        line = json.dumps({"nebula_progress_event": "pvt_condition_start", "corner": "tt"})
+        event = web_ui._parse_progress_line(line)
+        self.assertEqual(event["nebula_progress_event"], "pvt_condition_start")
+        self.assertEqual(event["corner"], "tt")
+
+    def test_blank_line_is_not_a_progress_event(self):
+        self.assertIsNone(web_ui._parse_progress_line(""))
+        self.assertIsNone(web_ui._parse_progress_line("   \n"))
+
+    def test_non_json_line_is_not_a_progress_event(self):
+        self.assertIsNone(web_ui._parse_progress_line("ngspice: warning: convergence issue"))
+
+    def test_json_without_the_marker_key_is_not_a_progress_event(self):
+        # e.g. the pipeline's OWN final result JSON, or any other stray
+        # JSON a subprocess might print -- must not be misread as progress.
+        self.assertIsNone(web_ui._parse_progress_line(json.dumps({"target": {}, "backend": "real"})))
+
+    def test_json_array_is_not_a_progress_event(self):
+        self.assertIsNone(web_ui._parse_progress_line(json.dumps([1, 2, 3])))
+
+    def test_truncated_json_does_not_raise(self):
+        self.assertIsNone(web_ui._parse_progress_line('{"nebula_progress_event": "pvt_condition_st'))
+
+
+class ApplyProgressEventTests(unittest.TestCase):
+    """Pure-function tests for _apply_progress_event -- the state-mutation
+    logic, independent of subprocess/locking plumbing.
+    """
+
+    def _entry(self):
+        return {
+            "pvt_conditions_total": None, "pvt_conditions_completed": None,
+            "pvt_current_corner": None, "pvt_current_temperature_c": None, "pvt_current_supply_v": None,
+        }
+
+    def test_candidate_generation_complete_sets_total_from_feasible_times_conditions(self):
+        # Requirement 3: total = number_of_feasible_candidates * len(pvt_conditions).
+        entry = self._entry()
+        web_ui._apply_progress_event(entry, {
+            "nebula_progress_event": "candidate_generation_complete",
+            "n_feasible": 3, "pvt_conditions_total": 6,  # 3 candidates x 2 smoke conditions
+        })
+        self.assertEqual(entry["pvt_conditions_total"], 6)
+        self.assertEqual(entry["pvt_conditions_completed"], 0)
+
+    def test_zero_total_leaves_progress_fields_unset(self):
+        # pvt_conditions_total == 0 means "none" mode (or zero feasible
+        # candidates) -- must not turn on PVT progress display at all.
+        entry = self._entry()
+        web_ui._apply_progress_event(entry, {
+            "nebula_progress_event": "candidate_generation_complete",
+            "n_feasible": 2, "pvt_conditions_total": 0,
+        })
+        self.assertIsNone(entry["pvt_conditions_total"])
+        self.assertIsNone(entry["pvt_conditions_completed"])
+
+    def test_start_event_sets_current_condition_but_does_not_advance_completed(self):
+        # Requirement 4: starting a condition must NOT count as completed.
+        entry = self._entry()
+        entry["pvt_conditions_total"] = 2
+        entry["pvt_conditions_completed"] = 0
+        web_ui._apply_progress_event(entry, {
+            "nebula_progress_event": "pvt_condition_start",
+            "corner": "ff", "temperature_c": 125.0, "supply_v": 1.71,
+        })
+        self.assertEqual(entry["pvt_conditions_completed"], 0)
+        self.assertEqual(entry["pvt_current_corner"], "ff")
+        self.assertEqual(entry["pvt_current_temperature_c"], 125.0)
+        self.assertEqual(entry["pvt_current_supply_v"], 1.71)
+
+    def test_complete_event_advances_completed_count_by_exactly_one(self):
+        entry = self._entry()
+        entry["pvt_conditions_total"] = 2
+        entry["pvt_conditions_completed"] = 0
+        web_ui._apply_progress_event(entry, {
+            "nebula_progress_event": "pvt_condition_complete",
+            "corner": "tt", "temperature_c": 27.0, "supply_v": 1.8, "success": True, "failed_stage": None,
+        })
+        self.assertEqual(entry["pvt_conditions_completed"], 1)
+
+    def test_complete_event_advances_count_on_definitive_failure_too(self):
+        # "completed successfully OR failed definitively" both count.
+        entry = self._entry()
+        entry["pvt_conditions_total"] = 2
+        entry["pvt_conditions_completed"] = 0
+        web_ui._apply_progress_event(entry, {
+            "nebula_progress_event": "pvt_condition_complete",
+            "corner": "ff", "temperature_c": 125.0, "supply_v": 1.71, "success": False, "failed_stage": "transient",
+        })
+        self.assertEqual(entry["pvt_conditions_completed"], 1)
+
+    def test_full_sequence_reaches_total_completed(self):
+        # Requirement 7: "PVT evaluation: 0/2 -> 1/2 -> 2/2".
+        entry = self._entry()
+        events = [
+            {"nebula_progress_event": "candidate_generation_complete", "n_feasible": 1, "pvt_conditions_total": 2},
+            {"nebula_progress_event": "pvt_condition_start", "corner": "tt", "temperature_c": 27.0, "supply_v": 1.8},
+            {"nebula_progress_event": "pvt_condition_complete", "corner": "tt", "temperature_c": 27.0,
+             "supply_v": 1.8, "success": True, "failed_stage": None},
+            {"nebula_progress_event": "pvt_condition_start", "corner": "ff", "temperature_c": 125.0, "supply_v": 1.71},
+            {"nebula_progress_event": "pvt_condition_complete", "corner": "ff", "temperature_c": 125.0,
+             "supply_v": 1.71, "success": True, "failed_stage": None},
+        ]
+        seen_completed = []
+        for event in events:
+            web_ui._apply_progress_event(entry, event)
+            seen_completed.append(entry["pvt_conditions_completed"])
+        self.assertEqual(seen_completed, [0, 0, 1, 1, 2])
+        self.assertEqual(entry["pvt_conditions_total"], 2)
+
+    def test_unrecognized_event_kind_is_ignored_not_an_error(self):
+        entry = self._entry()
+        web_ui._apply_progress_event(entry, {"nebula_progress_event": "something_new_and_unknown"})
+        self.assertIsNone(entry["pvt_conditions_total"])  # unchanged, no exception
+
+
+class StatusPayloadProgressFieldsTests(unittest.TestCase):
+    """_status_payload's exposure of progress fields -- "when available"
+    (requirement 1), and never for a "none" PVT run (requirement 6).
+    """
+
+    def _base_entry(self, run_id, **overrides):
+        entry = {
+            "run_id": run_id, "status": "running", "command": ["x"],
+            "output_path": "/tmp/x.json", "schematic_path": "/tmp/x.spice",
+            "started_at": 0.0, "finished_at": None, "returncode": None,
+            "error": None, "result": None, "stdout_tail": "", "stderr_tail": "",
+            "pvt_condition_set": None,
+            "pvt_conditions_total": None, "pvt_conditions_completed": None,
+            "pvt_current_corner": None, "pvt_current_temperature_c": None, "pvt_current_supply_v": None,
+        }
+        entry.update(overrides)
+        return entry
+
+    def test_progress_fields_present_when_pvt_total_is_set(self):
+        run_id = "testrun_progress_00000000000"
+        with web_ui._RUNS_LOCK:
+            web_ui._RUNS[run_id] = self._base_entry(
+                run_id, pvt_conditions_total=2, pvt_conditions_completed=1,
+                pvt_current_corner="ff", pvt_current_temperature_c=125.0, pvt_current_supply_v=1.71,
+            )
+        payload = web_ui._status_payload(run_id)
+        self.assertEqual(payload["pvt_conditions_total"], 2)
+        self.assertEqual(payload["pvt_conditions_completed"], 1)
+        self.assertEqual(payload["pvt_progress_fraction"], 0.5)
+        self.assertEqual(payload["pvt_current_corner"], "ff")
+
+    def test_none_pvt_run_has_no_progress_fields_at_all(self):
+        run_id = "testrun_noneprog_000000000000"
+        with web_ui._RUNS_LOCK:
+            web_ui._RUNS[run_id] = self._base_entry(run_id, pvt_condition_set=None)
+        payload = web_ui._status_payload(run_id)
+        for key in ("pvt_conditions_total", "pvt_conditions_completed", "pvt_progress_fraction",
+                    "pvt_current_corner", "pvt_long_running_full_sweep"):
+            self.assertNotIn(key, payload)
+
+    def test_entry_missing_progress_keys_entirely_does_not_break_status(self):
+        # Backward-compat: an entry built without the new keys (e.g. by
+        # older in-flight code) must not raise a KeyError.
+        run_id = "testrun_legacy_0000000000000"
+        with web_ui._RUNS_LOCK:
+            web_ui._RUNS[run_id] = {
+                "run_id": run_id, "status": "running", "command": ["x"],
+                "output_path": "/tmp/x.json", "schematic_path": "/tmp/x.spice",
+                "started_at": 0.0, "finished_at": None, "returncode": None,
+                "error": None, "result": None, "stdout_tail": "", "stderr_tail": "",
+            }
+        payload = web_ui._status_payload(run_id)
+        self.assertNotIn("pvt_conditions_total", payload)
+
+    def test_minimal27_gets_long_running_label(self):
+        run_id = "testrun_full27_0000000000000"
+        with web_ui._RUNS_LOCK:
+            web_ui._RUNS[run_id] = self._base_entry(
+                run_id, pvt_condition_set="minimal27", pvt_conditions_total=27, pvt_conditions_completed=3,
+            )
+        payload = web_ui._status_payload(run_id)
+        self.assertTrue(payload["pvt_long_running_full_sweep"])
+        # No ETA anywhere -- never computed from elapsed time.
+        self.assertNotIn("eta_s", payload)
+        self.assertNotIn("estimated_completion", payload)
+
+    def test_smoke_does_not_get_long_running_label(self):
+        run_id = "testrun_smokeprog_00000000000"
+        with web_ui._RUNS_LOCK:
+            web_ui._RUNS[run_id] = self._base_entry(
+                run_id, pvt_condition_set="smoke", pvt_conditions_total=2, pvt_conditions_completed=0,
+            )
+        payload = web_ui._status_payload(run_id)
+        self.assertNotIn("pvt_long_running_full_sweep", payload)
+
+
+class ExecuteRunProgressIntegrationTests(unittest.TestCase):
+    """End-to-end: a real short-lived subprocess emitting the exact line
+    format experiments/run_autockt_pipeline.py's progress emitter
+    produces, read through the real _execute_run/_drain_subprocess_with_
+    progress path (no mocking) -- proves the wiring, not just the pure
+    helper functions in isolation.
+    """
+
+    def test_progress_lines_from_a_real_subprocess_update_status_live(self):
+        run_id = "testrun_liveprog_0000000000"
+        with web_ui._RUNS_LOCK:
+            web_ui._RUNS[run_id] = {
+                "run_id": run_id, "status": "queued", "command": ["x"],
+                "output_path": "/tmp/nope5.json", "schematic_path": "/tmp/nope5.spice",
+                "started_at": None, "finished_at": None, "returncode": None,
+                "error": None, "result": None, "stdout_tail": "", "stderr_tail": "",
+                "pvt_condition_set": "smoke",
+                "pvt_conditions_total": None, "pvt_conditions_completed": None,
+                "pvt_current_corner": None, "pvt_current_temperature_c": None, "pvt_current_supply_v": None,
+            }
+        script = (
+            "import json, sys, time\n"
+            "def emit(d):\n"
+            "    print(json.dumps(d)); sys.stdout.flush()\n"
+            "emit({'nebula_progress_event': 'candidate_generation_complete', "
+            "'n_feasible': 1, 'pvt_conditions_total': 2})\n"
+            "emit({'nebula_progress_event': 'pvt_condition_start', 'corner': 'tt', "
+            "'temperature_c': 27.0, 'supply_v': 1.8})\n"
+            "emit({'nebula_progress_event': 'pvt_condition_complete', 'corner': 'tt', "
+            "'temperature_c': 27.0, 'supply_v': 1.8, 'success': True, 'failed_stage': None})\n"
+            "emit({'nebula_progress_event': 'pvt_condition_start', 'corner': 'ff', "
+            "'temperature_c': 125.0, 'supply_v': 1.71})\n"
+            "print('ngspice: some unrelated stderr-ish stdout noise')\n"  # malformed/irrelevant line
+            "emit({'nebula_progress_event': 'pvt_condition_complete', 'corner': 'ff', "
+            "'temperature_c': 125.0, 'supply_v': 1.71, 'success': True, 'failed_stage': None})\n"
+            "sys.exit(1)\n"
+        )
+        argv = [sys.executable, "-c", script]
+        web_ui._execute_run(run_id, argv, Path("/tmp/nope5.json"), Path("/tmp/nope5.spice"))
+
+        payload = web_ui._status_payload(run_id)
+        self.assertEqual(payload["pvt_conditions_total"], 2)
+        self.assertEqual(payload["pvt_conditions_completed"], 2)
+        self.assertEqual(payload["pvt_progress_fraction"], 1.0)
+        self.assertEqual(payload["pvt_current_corner"], "ff")
+        # The interleaved non-JSON line must not have broken anything.
+        self.assertIn("unrelated stderr-ish stdout noise", payload["stdout_tail"])
 
 
 class PvtOptionsMatchPipelineTests(unittest.TestCase):

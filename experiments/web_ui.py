@@ -35,7 +35,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import select
 import subprocess
 import sys
 import threading
@@ -151,6 +153,129 @@ def _build_argv(payload: dict[str, Any], *, output_path: Path, schematic_path: P
     return argv
 
 
+# ---------------------------------------------------------------------------
+# PVT progress parsing ("Add visible PVT progress to web UI"): the pipeline
+# subprocess (experiments/run_autockt_pipeline.py::_pvt_progress_evaluator)
+# prints one flush=True JSON line per PVT (design, condition) pair to its
+# own stdout -- the SAME stream this server already captures, no new IPC.
+# These two functions are pure (no I/O, no locking) so they are testable
+# directly with plain strings/dicts, independent of subprocess plumbing.
+# ---------------------------------------------------------------------------
+
+_PROGRESS_EVENT_KEY = "nebula_progress_event"
+
+
+def _parse_progress_line(line: str) -> Optional[dict[str, Any]]:
+    """Best-effort parse of one stdout line as a pipeline progress event.
+    Never raises: any blank, non-JSON, non-object, or unrecognized line is
+    simply not a progress event (None) -- malformed or missing pipeline
+    output can never break a run (requirement: fall back gracefully)."""
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        event = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(event, dict) or _PROGRESS_EVENT_KEY not in event:
+        return None
+    return event
+
+
+def _apply_progress_event(entry: dict[str, Any], event: dict[str, Any]) -> None:
+    """Mutates one _RUNS entry in place from one parsed progress event.
+    Caller must hold _RUNS_LOCK.
+    """
+    kind = event.get(_PROGRESS_EVENT_KEY)
+    if kind == "candidate_generation_complete":
+        total = event.get("pvt_conditions_total") or 0
+        if total:
+            entry["pvt_conditions_total"] = total
+            entry["pvt_conditions_completed"] = 0
+        # total == 0 means pvt_conditions_set == "none" (or zero feasible
+        # candidates) -- leave every pvt_* field at its default (None), so
+        # a "none" run never shows misleading PVT progress.
+    elif kind == "pvt_condition_start":
+        entry["pvt_current_corner"] = event.get("corner")
+        entry["pvt_current_temperature_c"] = event.get("temperature_c")
+        entry["pvt_current_supply_v"] = event.get("supply_v")
+    elif kind == "pvt_condition_complete":
+        # Only a definitively finished (successful or failed) condition
+        # advances the count -- a "start" event above never does.
+        if entry.get("pvt_conditions_completed") is not None:
+            entry["pvt_conditions_completed"] += 1
+        entry["pvt_current_corner"] = event.get("corner")
+        entry["pvt_current_temperature_c"] = event.get("temperature_c")
+        entry["pvt_current_supply_v"] = event.get("supply_v")
+    # any other/unrecognized event kind is ignored, not an error.
+
+
+def _consume_stdout_line(run_id: str, line: str) -> None:
+    event = _parse_progress_line(line)
+    if event is None:
+        return
+    with _RUNS_LOCK:
+        entry = _RUNS.get(run_id)
+        if entry is not None:
+            _apply_progress_event(entry, event)
+
+
+def _drain_subprocess_with_progress(
+    proc: "subprocess.Popen[bytes]", run_id: str, deadline: float,
+) -> tuple[str, str, bool]:
+    """Reads proc.stdout and proc.stderr CONCURRENTLY (via select) until
+    both hit EOF or `deadline` (time.monotonic()) passes -- concurrently,
+    so a child that fills its stderr pipe's OS buffer while this only read
+    stdout could never deadlock this server. Every complete stdout line is
+    parsed as a possible progress event and applied live (under
+    _RUNS_LOCK) as it streams in, so /api/status reflects progress WHILE
+    the run is still going, not only after it exits. Returns
+    (stdout_text, stderr_text, timed_out) -- does not kill, wait(), or
+    close the streams; the caller still owns all of that.
+
+    Uses os.read() (one raw syscall, returns as soon as ANY data is
+    available) rather than the stream's own buffered .read(n) -- the
+    latter can keep issuing further raw reads to try to fill the full `n`
+    bytes even after select() reported the fd readable, which blocks past
+    what select() promised and defeats the whole point of multiplexing.
+    Popen must therefore be constructed WITHOUT text=True (binary pipes);
+    decoding happens here instead.
+    """
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    stdout_buffer = ""
+    readers: dict[Any, list[bytes]] = {proc.stdout: stdout_chunks, proc.stderr: stderr_chunks}
+    open_readers = list(readers)
+    timed_out = False
+
+    while open_readers:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        ready, _, _ = select.select(open_readers, [], [], min(remaining, 1.0))
+        for stream in ready:
+            chunk = os.read(stream.fileno(), 4096)
+            if chunk == b"":
+                open_readers.remove(stream)
+                continue
+            readers[stream].append(chunk)
+            if stream is proc.stdout:
+                stdout_buffer += chunk.decode("utf-8", errors="replace")
+                while "\n" in stdout_buffer:
+                    line, stdout_buffer = stdout_buffer.split("\n", 1)
+                    _consume_stdout_line(run_id, line)
+
+    if stdout_buffer:
+        _consume_stdout_line(run_id, stdout_buffer)
+
+    return (
+        b"".join(stdout_chunks).decode("utf-8", errors="replace"),
+        b"".join(stderr_chunks).decode("utf-8", errors="replace"),
+        timed_out,
+    )
+
+
 def _execute_run(run_id: str, argv: list[str], output_path: Path, schematic_path: Path) -> None:
     with _RUNS_LOCK:
         _RUNS[run_id]["status"] = "running"
@@ -159,16 +284,20 @@ def _execute_run(run_id: str, argv: list[str], output_path: Path, schematic_path
     timed_out = False
     try:
         proc = subprocess.Popen(
-            argv, cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            argv, cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
-        try:
-            stdout, stderr = proc.communicate(timeout=RUN_TIMEOUT_S)
-            returncode = proc.returncode
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        deadline = time.monotonic() + RUN_TIMEOUT_S
+        stdout, stderr, timed_out = _drain_subprocess_with_progress(proc, run_id, deadline)
+        if timed_out:
             proc.kill()
-            stdout, stderr = proc.communicate()  # reap the now-terminated process, collect whatever it wrote
-            returncode = proc.returncode
+            extra_stdout, extra_stderr = proc.communicate()  # reap the now-terminated process
+            stdout += (extra_stdout or b"").decode("utf-8", errors="replace")
+            stderr += (extra_stderr or b"").decode("utf-8", errors="replace")
+        else:
+            proc.wait()
+            proc.stdout.close()
+            proc.stderr.close()
+        returncode = proc.returncode
         launch_error: Optional[str] = None
     except OSError as exc:
         stdout, stderr, returncode = "", "", None
@@ -228,6 +357,9 @@ def _start_run(payload: dict[str, Any]) -> str:
             "output_path": str(output_path), "schematic_path": str(schematic_path),
             "started_at": None, "finished_at": None, "returncode": None,
             "error": None, "result": None, "stdout_tail": "", "stderr_tail": "",
+            "pvt_condition_set": payload.get("pvt_condition_set"),
+            "pvt_conditions_total": None, "pvt_conditions_completed": None,
+            "pvt_current_corner": None, "pvt_current_temperature_c": None, "pvt_current_supply_v": None,
         }
 
     thread = threading.Thread(target=_execute_run, args=(run_id, argv, output_path, schematic_path), daemon=True)
@@ -256,6 +388,27 @@ def _status_payload(run_id: str) -> Optional[dict[str, Any]]:
     }
     if entry["result"] is not None and entry["result"].get("schematic_path"):
         payload["schematic_path"] = entry["result"]["schematic_path"]
+
+    # PVT progress fields -- included only "when available" (requirement
+    # 1): a "none" PVT run, or one where the pipeline hasn't yet reported
+    # candidate_generation_complete, never sets pvt_conditions_total, so
+    # none of this appears and the UI shows only the generic running state
+    # (requirement 6/9).
+    total = entry.get("pvt_conditions_total")
+    if total:
+        completed = entry.get("pvt_conditions_completed") or 0
+        payload["pvt_conditions_total"] = total
+        payload["pvt_conditions_completed"] = completed
+        payload["pvt_progress_fraction"] = round(completed / total, 4)
+        if entry.get("pvt_current_corner") is not None:
+            payload["pvt_current_corner"] = entry["pvt_current_corner"]
+            payload["pvt_current_temperature_c"] = entry["pvt_current_temperature_c"]
+            payload["pvt_current_supply_v"] = entry["pvt_current_supply_v"]
+    if entry.get("pvt_condition_set") == "minimal27":
+        # Full 27-point sweep: no ETA (none of this is based on measured
+        # data), just an explicit "this is long-running" label.
+        payload["pvt_long_running_full_sweep"] = True
+
     return payload
 
 
@@ -488,7 +641,7 @@ INDEX_HTML = r"""<!doctype html>
     </fieldset>
 
     <button id="runBtn">Run NEBULA</button>
-    <div id="statusLine"><span id="statusBadge" class="status-badge status-idle">idle</span><span id="elapsed"></span></div>
+    <div id="statusLine"><span id="statusBadge" class="status-badge status-idle">idle</span><span id="elapsed"></span><span id="pvtProgress"></span></div>
   </div>
 
   <div class="panel">
@@ -651,10 +804,24 @@ function showJson(result) {
   view.style.display = 'block';
 }
 
+function pvtProgressText(payload) {
+  if (!payload.pvt_conditions_total) return '';
+  let text = ` — PVT evaluation: ${payload.pvt_conditions_completed} / ${payload.pvt_conditions_total} conditions`;
+  if (payload.pvt_current_corner) {
+    text += ` (currently: ${payload.pvt_current_corner.toUpperCase()} / ` +
+            `${payload.pvt_current_temperature_c}°C / ${payload.pvt_current_supply_v}V)`;
+  }
+  if (payload.pvt_long_running_full_sweep) {
+    text += ' — full 27-point sweep, long-running';
+  }
+  return text;
+}
+
 function poll(runId) {
   fetch(`/api/status/${runId}`).then(r => r.json()).then(payload => {
     setBadge(payload.status);
     $('elapsed').textContent = payload.elapsed_s + 's elapsed';
+    $('pvtProgress').textContent = pvtProgressText(payload);
     if (payload.status === 'running' || payload.status === 'queued') {
       pollTimer = setTimeout(() => poll(runId), 1200);
       return;
@@ -681,6 +848,7 @@ $('runBtn').addEventListener('click', () => {
   $('runBtn').disabled = true;
   setBadge('queued');
   $('elapsed').textContent = '';
+  $('pvtProgress').textContent = '';
 
   fetch('/api/run', {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildPayload()),

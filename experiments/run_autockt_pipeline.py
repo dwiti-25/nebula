@@ -399,6 +399,57 @@ def measure_hd3_and_noise(
 
 
 # ---------------------------------------------------------------------------
+# PVT progress reporting (experiments/web_ui.py "Add visible PVT progress"):
+# small, purely additive stdout output so a subprocess caller can show real
+# progress for a long PVT run instead of an opaque "running" state. Does
+# NOT change select_final_design/PVT_CONDITION_SET_FIDELITY (commit
+# 54eeb04) or any evaluation result: each single-condition call below is
+# behaviorally identical to evaluate_pvt_grid's own per-condition loop
+# (analysis.pvt_selection.run_pvt_evaluation never passes
+# stop_on_failure=True, so there is no early-exit difference to preserve).
+# ---------------------------------------------------------------------------
+
+def _pvt_progress_evaluator(feasible_candidates: list[PipelineCandidate], real_evaluate_pvt_grid):
+    """Wraps analysis.pvt_selection.evaluate_pvt_grid (same call signature)
+    to emit one flush=True JSON line per (design, condition) pair -- start
+    and complete -- to stdout. select_final_design calls run_pvt_evaluation
+    once per design, in the same order as feasible_candidates, so a simple
+    counter recovers which design_id (matching _candidate_to_design's own
+    f"pipeline_ep{episode}" naming) each call belongs to.
+    """
+    total_designs = len(feasible_candidates)
+    design_index = 0
+
+    def wrapped(parameters, *, conditions, fidelity):
+        nonlocal design_index
+        design_id = f"pipeline_ep{feasible_candidates[design_index].episode}"
+        total_conditions = len(conditions)
+        results = []
+        for condition_index, condition in enumerate(conditions):
+            print(json.dumps({
+                "nebula_progress_event": "pvt_condition_start",
+                "design_id": design_id, "design_index": design_index, "total_designs": total_designs,
+                "condition_index": condition_index, "total_conditions_per_design": total_conditions,
+                "corner": condition.process_corner.value, "temperature_c": condition.temperature_c,
+                "supply_v": condition.supply_v,
+            }), flush=True)
+            (evaluation,) = real_evaluate_pvt_grid(parameters, conditions=(condition,), fidelity=fidelity)
+            results.append(evaluation)
+            print(json.dumps({
+                "nebula_progress_event": "pvt_condition_complete",
+                "design_id": design_id, "design_index": design_index, "total_designs": total_designs,
+                "condition_index": condition_index, "total_conditions_per_design": total_conditions,
+                "corner": condition.process_corner.value, "temperature_c": condition.temperature_c,
+                "supply_v": condition.supply_v,
+                "success": evaluation.success, "failed_stage": evaluation.failed_stage,
+            }), flush=True)
+        design_index += 1
+        return tuple(results)
+
+    return wrapped
+
+
+# ---------------------------------------------------------------------------
 # Full pipeline
 # ---------------------------------------------------------------------------
 
@@ -429,10 +480,28 @@ def run_pipeline(
         initial_indices_source=initial_indices_source,
     )
     feasible = filter_nominal_feasible(candidates)
-    selection = select_final_design(
-        feasible, pvt_conditions=pvt_conditions, pvt_fidelity=pvt_fidelity,
-        trade_off_preference=trade_off_preference,
-    )
+    print(json.dumps({
+        "nebula_progress_event": "candidate_generation_complete",
+        "n_feasible": len(feasible),
+        "pvt_conditions_total": (len(feasible) * len(pvt_conditions)) if pvt_conditions else 0,
+    }), flush=True)
+
+    if pvt_conditions is not None:
+        import analysis.pvt_selection as _pvt_selection_module
+        _real_evaluate_pvt_grid = _pvt_selection_module.evaluate_pvt_grid
+        _pvt_selection_module.evaluate_pvt_grid = _pvt_progress_evaluator(feasible, _real_evaluate_pvt_grid)
+        try:
+            selection = select_final_design(
+                feasible, pvt_conditions=pvt_conditions, pvt_fidelity=pvt_fidelity,
+                trade_off_preference=trade_off_preference,
+            )
+        finally:
+            _pvt_selection_module.evaluate_pvt_grid = _real_evaluate_pvt_grid
+    else:
+        selection = select_final_design(
+            feasible, pvt_conditions=pvt_conditions, pvt_fidelity=pvt_fidelity,
+            trade_off_preference=trade_off_preference,
+        )
 
     result: dict[str, Any] = {
         "target": target.as_dict(),
