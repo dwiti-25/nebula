@@ -56,12 +56,17 @@ class ReceiverParameters:
     cdeg_f: float = 0.5e-12
     itail_a: float = 100e-6
     dfe_tap_v: float = 0.0
+    mos_width_um: float = 10.0
+    mos_length_um: float = 0.15
+    mos_multiplier: int = 1
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, ParameterValue]) -> "ReceiverParameters":
         aliases = {
             "RLOAD": "rload_ohm", "RDEG": "rdeg_ohm", "CDEG": "cdeg_f",
             "ITAIL_VAL": "itail_a", "DFE_TAP": "dfe_tap_v",
+            "MOS_W": "mos_width_um", "MOS_L": "mos_length_um",
+            "MOS_M": "mos_multiplier",
         }
         normalized = {aliases.get(name, name.lower()): spice_number(value) for name, value in values.items()}
         return cls(**normalized)
@@ -75,6 +80,9 @@ class ReceiverParameters:
             "VDD_VAL": conditions.supply_v,
             "VIN_CM": conditions.input_common_mode_v,
             "CLOAD": conditions.output_load_f,
+            "MOS_W": self.mos_width_um,
+            "MOS_L": self.mos_length_um,
+            "MOS_M": self.mos_multiplier,
         }
 
     def validate(self) -> None:
@@ -84,6 +92,14 @@ class ReceiverParameters:
         })
         if not -0.4 <= self.dfe_tap_v <= 0.4:
             raise ValueError("DFE tap must be between -0.4 V and 0.4 V")
+        if not 0.42 <= self.mos_width_um <= 100.0:
+            raise ValueError("grouped MOS width must be between 0.42 um and 100 um")
+        if not 0.15 <= self.mos_length_um <= 1.0:
+            raise ValueError("grouped MOS length must be between 0.15 um and 1 um")
+        if isinstance(self.mos_multiplier, bool) or int(self.mos_multiplier) != self.mos_multiplier:
+            raise ValueError("grouped MOS multiplier must be an integer")
+        if not 1 <= int(self.mos_multiplier) <= 16:
+            raise ValueError("grouped MOS multiplier must be between 1 and 16")
 
 
 @dataclass(frozen=True)

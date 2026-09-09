@@ -27,6 +27,7 @@ ACTION_BOUNDS = (
     ("itail_a", 10e-6, 1e-3, "log"),
     ("dfe_tap_v", -0.4, 0.4, "linear"),
 )
+LEGACY_PARAMETER_NAMES = tuple(name for name, *_ in ACTION_BOUNDS)
 
 METRIC_OBSERVATION_NAMES = (
     "gain_100mhz_db", "gain_2p5ghz_db", "peaking_db",
@@ -201,7 +202,9 @@ class ReceiverRLAdapter:
                 "evaluation_id": evaluation.evaluation_id,
                 "evaluation_count": self.evaluations,
                 "total_evaluation_count": self.total_evaluations,
-                "parameters": asdict(parameters),
+                # Preserve the v1/v2 five-parameter event contract exactly.
+                # Expanded MOS sizing uses a separately versioned adapter/schema.
+                "parameters": {name: getattr(parameters, name) for name in LEGACY_PARAMETER_NAMES},
                 "reward_version": REWARD_VERSION,
                 "action_schema_version": ACTION_SCHEMA_VERSION,
                 "observation_schema_version": OBSERVATION_SCHEMA_VERSION,
