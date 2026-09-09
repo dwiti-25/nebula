@@ -683,7 +683,9 @@ INDEX_HTML = r"""<!doctype html>
       <select id="rlVersion">
         <option value="v1">PPO v1 — historical baseline</option>
         <option value="v2">PPO v2 — corrected reset + validity state + reward v2</option>
+        <option value="v3" disabled>PPO v3 — grouped MOS + passive/bias sizing + area-aware optimization (being implemented)</option>
       </select>
+      <p class="hint" id="rlVersionDescription"></p>
       <label style="display:flex; align-items:center; gap:8px; margin-top:12px; cursor:pointer">
         <input id="evaluationCache" type="checkbox" style="width:auto">
         <span style="margin:0">Reuse exact repeated evaluations</span>
@@ -782,6 +784,18 @@ INDEX_HTML = r"""<!doctype html>
 <script>
 const $ = (id) => document.getElementById(id);
 let pollTimer = null;
+
+const RL_VERSION_DESCRIPTIONS = {
+  v1: 'Historical AutoCkt-compatible five-parameter baseline. Preserves the original reset, state and reward behavior for reproducibility.',
+  v2: 'Improved five-parameter model. Measures the initial circuit state, encodes metric validity and failure stage, and uses the corrected dense reward. Existing v2 checkpoints remain compatible.',
+  v3: 'Expanded eight-parameter model. Optimizes the five legacy values plus one matched MOS width, length and multiplier group; reports geometry-aware partial area and will use a separately versioned eight-head checkpoint. It remains disabled until the expanded RL/search contract is complete.'
+};
+
+function updateRlDescription() {
+  $('rlVersionDescription').textContent = RL_VERSION_DESCRIPTIONS[$('rlVersion').value];
+}
+$('rlVersion').addEventListener('change', updateRlDescription);
+updateRlDescription();
 
 $('targetMode').addEventListener('change', () => {
   $('customTargetFields').style.display = $('targetMode').value === 'custom' ? 'block' : 'none';

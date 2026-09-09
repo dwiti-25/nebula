@@ -84,9 +84,10 @@ is intentionally deferred until a documented channel file is supplied.
 - Never convert a partial estimate into a PASS for the 0.05 mm2 requirement.
 - Expose component-level area contributions and provenance in JSON/UI reports.
 
-### 4. Versioned RL contract
+### 4. Versioned RL contract: PPO v3
 
-- Introduce a new expanded action/state/checkpoint schema; do not silently
+- Name the expanded model **PPO v3**. Introduce a new expanded
+  action/state/checkpoint schema; do not silently
   reinterpret PPO v1/v2 checkpoints.
 - Add normalized geometry/area observations and validity masks.
 - Add area margin to the dense reward only when the selected area mode is

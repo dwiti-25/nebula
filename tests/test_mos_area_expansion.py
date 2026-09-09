@@ -3,6 +3,7 @@ import unittest
 
 from analysis.area_estimate import estimate_ctle_area
 from experiments.export_final_schematic import render_final_schematic
+from experiments.web_ui import INDEX_HTML
 from simulator.config import SimulationConditions
 from simulator.receiver import BENCHES, ReceiverParameters
 
@@ -57,6 +58,13 @@ class GroupedMosSizingTests(unittest.TestCase):
         self.assertIn("MOS_W=20", text)
         self.assertIn("MOS_L=0.3", text)
         self.assertIn("MOS_M=4", text)
+
+    def test_ui_names_and_explains_all_three_ppo_versions(self):
+        self.assertIn('value="v1"', INDEX_HTML)
+        self.assertIn('value="v2"', INDEX_HTML)
+        self.assertIn('value="v3" disabled', INDEX_HTML)
+        self.assertIn("Expanded eight-parameter model", INDEX_HTML)
+        self.assertIn("matched MOS width, length and multiplier", INDEX_HTML)
 
 
 if __name__ == "__main__":
