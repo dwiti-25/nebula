@@ -58,6 +58,7 @@ import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+from simulator.channel import ChannelPortMap, load_s4p, validate_s4p_channel
 from simulator.config import ProcessCorner, SimulationConditions
 from simulator.receiver import EvaluationFidelity, ReceiverParameters, evaluate_receiver
 from simulator.rl_adapter import ReceiverRLAdapter, RLBudget
@@ -85,6 +86,19 @@ from analysis.pvt_selection import (
     run_pvt_evaluation,
     select_with_trade_off_preference,
 )
+
+SYNTHETIC_CHANNEL_PATH = PROJECT_ROOT / "channels" / "synthetic_regression.s4p"
+REFERENCE_CHANNEL_PATH = PROJECT_ROOT / "channels" / "ieee802_ibm_20db_thru.s4p"
+REFERENCE_CHANNEL_PORT_MAP = ChannelPortMap(1, 3, 2, 4)
+
+
+def _channel_evaluator_kwargs(
+    channel_path: str | Path, channel_port_map: ChannelPortMap,
+) -> dict[str, Any]:
+    """Keep the historical default call signature while allowing a real channel."""
+    if Path(channel_path).resolve() == SYNTHETIC_CHANNEL_PATH.resolve() and channel_port_map == ChannelPortMap():
+        return {}
+    return {"channel_path": channel_path, "channel_port_map": channel_port_map}
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +235,8 @@ def generate_candidates(
     max_evaluations: int = 1000,
     rl_version: str = "v1",
     use_evaluation_cache: bool = False,
+    channel_path: str | Path = SYNTHETIC_CHANNEL_PATH,
+    channel_port_map: ChannelPortMap = ChannelPortMap(),
 ) -> list[PipelineCandidate]:
     """Deterministic rollout of an existing policy against `target`, via the
     real, UNMODIFIED AutoCktReceiverEnv + PPOAgent + ReceiverRLAdapter.
@@ -239,6 +255,9 @@ def generate_candidates(
     if rl_version not in {"v1", "v2"}:
         raise ValueError("rl_version must be 'v1' or 'v2'")
     adapter_kwargs: dict[str, Any] = {}
+    channel_kwargs = _channel_evaluator_kwargs(channel_path, channel_port_map)
+    if channel_kwargs:
+        adapter_kwargs["evaluator_kwargs"] = channel_kwargs
     if backend == "synthetic":
         adapter_kwargs["evaluator"] = synthetic_evaluate_receiver
     if use_evaluation_cache:
@@ -334,6 +353,8 @@ def select_final_design(
     minimum_pass_rate: float = 1.0,
     trade_off_preference: str = "most_robust",
     target: Optional[TargetSpec] = None,
+    channel_path: str | Path = SYNTHETIC_CHANNEL_PATH,
+    channel_port_map: ChannelPortMap = ChannelPortMap(),
 ) -> dict[str, Any]:
     """Priority, deterministic and documented (not an arbitrary weighted
     score): (1) nominal feasibility -- already guaranteed by only receiving
@@ -365,7 +386,10 @@ def select_final_design(
 
     fidelity = pvt_fidelity or EvaluationFidelity.FINAL
     pvt_results: list[PVTRobustnessResult] = [
-        run_pvt_evaluation(d, pvt_conditions, fidelity=fidelity, target=target) for d in designs
+        run_pvt_evaluation(
+            d, pvt_conditions, fidelity=fidelity, target=target,
+            evaluator_kwargs=_channel_evaluator_kwargs(channel_path, channel_port_map),
+        ) for d in designs
     ]
     top = select_with_trade_off_preference(
         pvt_results, designs, preference=trade_off_preference, minimum_pass_rate=minimum_pass_rate,
@@ -455,6 +479,8 @@ def _pvt_result_from_selection(selection: dict[str, Any]) -> Optional[PVTRobustn
 
 def measure_hd3_and_noise(
     parameters: dict[str, float], *, conditions: SimulationConditions = SimulationConditions(),
+    channel_path: str | Path = SYNTHETIC_CHANNEL_PATH,
+    channel_port_map: ChannelPortMap = ChannelPortMap(),
 ) -> dict[str, Any]:
     """Runs the existing, unmodified evaluate_receiver at FINAL fidelity for
     one design at nominal conditions -- the only fidelity level at which
@@ -465,7 +491,10 @@ def measure_hd3_and_noise(
     reporting NOT CLAIMED for HD3/noise rather than inventing a number.
     """
 
-    evaluation = evaluate_receiver(ReceiverParameters(**parameters), conditions, EvaluationFidelity.FINAL)
+    evaluation = evaluate_receiver(
+        ReceiverParameters(**parameters), conditions, EvaluationFidelity.FINAL,
+        **_channel_evaluator_kwargs(channel_path, channel_port_map),
+    )
     return {"success": evaluation.success, "metrics": dict(evaluation.metrics), "failed_stage": evaluation.failed_stage}
 
 
@@ -491,7 +520,7 @@ def _pvt_progress_evaluator(feasible_candidates: list[PipelineCandidate], real_e
     total_designs = len(feasible_candidates)
     design_index = 0
 
-    def wrapped(parameters, *, conditions, fidelity):
+    def wrapped(parameters, *, conditions, fidelity, **evaluator_kwargs):
         nonlocal design_index
         design_id = f"pipeline_ep{feasible_candidates[design_index].episode}"
         total_conditions = len(conditions)
@@ -504,7 +533,10 @@ def _pvt_progress_evaluator(feasible_candidates: list[PipelineCandidate], real_e
                 "corner": condition.process_corner.value, "temperature_c": condition.temperature_c,
                 "supply_v": condition.supply_v,
             }), flush=True)
-            (evaluation,) = real_evaluate_pvt_grid(parameters, conditions=(condition,), fidelity=fidelity)
+            (evaluation,) = real_evaluate_pvt_grid(
+                parameters, conditions=(condition,), fidelity=fidelity,
+                **evaluator_kwargs,
+            )
             results.append(evaluation)
             print(json.dumps({
                 "nebula_progress_event": "pvt_condition_complete",
@@ -542,16 +574,22 @@ def run_pipeline(
     export_schematic_to: Optional[Path] = None,
     rl_version: str = "v1",
     use_evaluation_cache: bool = False,
+    channel_path: str | Path = SYNTHETIC_CHANNEL_PATH,
+    channel_port_map: ChannelPortMap = ChannelPortMap(),
 ) -> dict[str, Any]:
     problems = validate_target(target)
     if problems:
         raise ValueError(f"invalid target specification: {problems}")
+
+    channel = load_s4p(channel_path, port_map=channel_port_map)
+    channel_metrics = validate_s4p_channel(channel)
 
     candidates = generate_candidates(
         target=target, checkpoint_path=checkpoint_path, agent_seed=agent_seed, eval_seed=eval_seed,
         episodes=episodes, horizon=horizon, backend=backend, randomize_initial_state=randomize_initial_state,
         initial_indices_source=initial_indices_source,
         rl_version=rl_version, use_evaluation_cache=use_evaluation_cache,
+        channel_path=channel_path, channel_port_map=channel_port_map,
     )
     feasible = filter_nominal_feasible(candidates, target)
     print(json.dumps({
@@ -568,6 +606,7 @@ def run_pipeline(
             selection = select_final_design(
                 feasible, pvt_conditions=pvt_conditions, pvt_fidelity=pvt_fidelity,
                 trade_off_preference=trade_off_preference, target=target,
+                channel_path=channel_path, channel_port_map=channel_port_map,
             )
         finally:
             _pvt_selection_module.evaluate_pvt_grid = _real_evaluate_pvt_grid
@@ -575,6 +614,7 @@ def run_pipeline(
         selection = select_final_design(
             feasible, pvt_conditions=pvt_conditions, pvt_fidelity=pvt_fidelity,
             trade_off_preference=trade_off_preference, target=target,
+            channel_path=channel_path, channel_port_map=channel_port_map,
         )
 
     result: dict[str, Any] = {
@@ -584,6 +624,10 @@ def run_pipeline(
         "state_schema": rl_version,
         "reward_schema": "reward_v2" if rl_version == "v2" else "autockt_reward_v1",
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
+        "channel": {
+            "path": str(channel.path), "checksum": channel.checksum,
+            "port_map": asdict(channel_port_map), "metrics": channel_metrics,
+        },
         "n_candidates_generated": len(candidates),
         "n_nominally_feasible": len(feasible),
         "selection": selection,
@@ -600,7 +644,10 @@ def run_pipeline(
     }
 
     if selection["selected"] is not None and measure_hd3_noise_flag and backend == "real":
-        refinement = measure_hd3_and_noise(selection["selected"]["parameters"])
+        refinement = measure_hd3_and_noise(
+            selection["selected"]["parameters"], channel_path=channel_path,
+            channel_port_map=channel_port_map,
+        )
         result["hd3_noise_refinement"] = {
             "attempted": True, "success": refinement["success"], "failed_stage": refinement["failed_stage"],
         }
@@ -660,6 +707,14 @@ def _main() -> int:
                         help="Versioned PPO configuration; v1 remains the historical baseline.")
     parser.add_argument("--evaluation-cache", action="store_true",
                         help="Cache exact repeated evaluator calls (recommended for PPO v2).")
+    parser.add_argument(
+        "--channel", type=Path, default=SYNTHETIC_CHANNEL_PATH,
+        help="Touchstone 1.x four-port channel used by candidate, PVT and refinement evaluations.",
+    )
+    parser.add_argument(
+        "--channel-ports", type=int, nargs=4, metavar=("TXP", "TXN", "RXP", "RXN"),
+        default=(1, 2, 3, 4), help="one-based physical port map used to form Sdd21",
+    )
     parser.add_argument("--backend", choices=("real", "synthetic"), default="synthetic")
     parser.add_argument("--episodes", type=int, default=3)
     parser.add_argument("--horizon", type=int, default=4)
@@ -718,6 +773,7 @@ def _main() -> int:
         measure_hd3_noise_flag=args.measure_hd3_noise,
         export_schematic_to=args.export_schematic,
         rl_version=args.rl_version, use_evaluation_cache=args.evaluation_cache,
+        channel_path=args.channel, channel_port_map=ChannelPortMap(*args.channel_ports),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")

@@ -1,0 +1,37 @@
+{
+  "channel_id": "ieee802_ibm_experimental_20db_thru",
+  "description": "THRU path from IBM's public IEEE 802.3 100 Gb/s experimental backplane test-fixture data set",
+  "source_page": "https://www.ieee802.org/3/100GCU/public/ChannelData/IBM_11_0518/",
+  "source_archive": "20db_Loss_Cahnnel.zip",
+  "source_document": "patel_02_0511.pdf",
+  "sha256": "ce6002f8663623ebc0992c458c3d518faf79ccfeb65d1ee59c8c638bccd66581",
+  "measured_or_simulated": "publisher describes the files as experimental test-fixture S-parameters; acquisition method is not stated in the supplied header",
+  "touchstone_matrix_order": "row-major full matrix (S11 S12 ... S14, S21 ... S44)",
+  "port_map": {
+    "tx_positive": 1,
+    "tx_negative": 3,
+    "rx_positive": 2,
+    "rx_negative": 4
+  },
+  "port_map_basis": "the two dominant forward paths are S21 and S43; this assignment produces the physically causal differential THRU response",
+  "reference_impedance_ohm": 50,
+  "frequency_start_hz": 10000000,
+  "frequency_stop_hz": 20000000000,
+  "frequency_points": 2000,
+  "qualification_metrics": {
+    "loss_1p25ghz_db": -4.247022129230723,
+    "loss_2p5ghz_db": -6.312316404543054,
+    "loss_5ghz_db": -10.926920100012751,
+    "max_singular_value_through_5ghz": 1.003652382972009,
+    "bulk_delay_s": 4.600375344214258e-9,
+    "negative_time_energy_ratio": 0.0007507398001901854
+  },
+  "project_role": "public lossy reference channel for integration, RL training and comparison",
+  "pcie_gen2_compliance_evidence": false,
+  "final_compliance_evidence": false,
+  "limitations": [
+    "This data set was contributed to an IEEE 802.3 backplane study, not a PCI-SIG PCIe compliance program.",
+    "It is suitable for exercising and benchmarking the PCIe Gen-2 equalizer at 2.5 GHz Nyquist, but must not be called a certified PCIe channel.",
+    "The publisher supplies the model as-is for modeling purposes with no warranties or guarantees; the original disclaimer remains in the S4P header."
+  ]
+}

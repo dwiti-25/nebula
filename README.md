@@ -249,11 +249,19 @@ synthetic channel:
 python -m experiments.evaluate_receiver --fidelity training
 ```
 
-Use a real four-port channel when one is available:
+Use the integrated public lossy reference channel:
 
 ```powershell
-python -m experiments.evaluate_receiver --channel C:\channels\board.s4p --fidelity candidate
+python -m experiments.evaluate_receiver `
+  --channel channels\ieee802_ibm_20db_thru.s4p `
+  --channel-ports 1 3 2 4 --fidelity training
 ```
+
+This IEEE/IBM experimental backplane THRU model is 50 ohm, spans 10 MHz to
+20 GHz, and loses 6.31 dB at the PCIe Gen-2 2.5 GHz Nyquist frequency. It is a
+realistic public development/training reference, not PCI-SIG compliance
+evidence. Source, checksum, port-map basis, qualification metrics and the
+publisher's limitations are in `channels/ieee802_ibm_20db_thru.json`.
 
 Port order is explicit and one-based (`TXP TXN RXP RXN`).  The default is
 `1 2 3 4`; override it only from the channel vendor's documentation:
@@ -566,6 +574,12 @@ authority for every accepted action; this policy does not change the RL action b
 
 The bundled synthetic channel has zero phase and exists only to test software
 deterministically. It must not be used as final PCIe channel evidence.
+
+The bundled IEEE/IBM channel passes the project's automated 50-ohm, bandwidth,
+passivity, causality and phase-unwrapping preflight and has also completed a
+real ngspice TRAINING-fidelity CTLE+channel+behavioral-DFE evaluation. Because
+it comes from an IEEE 802.3 backplane study rather than PCI-SIG, results using
+it must be described as reference-channel results, not PCIe compliance.
 
 ### Remaining qualification before RL training
 

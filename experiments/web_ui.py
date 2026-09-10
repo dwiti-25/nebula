@@ -81,6 +81,10 @@ _RUNS_LOCK = threading.Lock()
 TARGET_MODES = ("trivial", "hard", "custom")
 BACKENDS = ("synthetic", "real")
 RL_VERSIONS = ("v1", "v2")
+CHANNELS = {
+    "synthetic": ("channels/synthetic_regression.s4p", (1, 2, 3, 4)),
+    "ieee802_reference": ("channels/ieee802_ibm_20db_thru.s4p", (1, 3, 2, 4)),
+}
 # Kept as a plain string tuple (not imported from experiments.run_autockt_
 # pipeline) so this server never has to import torch/simulator/rl at
 # startup -- see the module docstring's design note. Cross-checked against
@@ -117,6 +121,8 @@ def _validate_request(payload: dict[str, Any]) -> list[str]:
         problems.append(f"backend must be one of {BACKENDS}")
     if payload.get("rl_version", "v1") not in RL_VERSIONS:
         problems.append(f"rl_version must be one of {RL_VERSIONS}")
+    if payload.get("channel_id", "synthetic") not in CHANNELS:
+        problems.append(f"channel_id must be one of {tuple(CHANNELS)}")
     try:
         episodes = int(payload.get("episodes", 0))
         if episodes < 1:
@@ -148,6 +154,7 @@ def _validate_request(payload: dict[str, Any]) -> list[str]:
 
 
 def _build_argv(payload: dict[str, Any], *, output_path: Path, schematic_path: Path) -> list[str]:
+    channel_path, channel_ports = CHANNELS[payload.get("channel_id", "synthetic")]
     argv = [
         sys.executable, "-m", "experiments.run_autockt_pipeline",
         "--backend", payload["backend"],
@@ -157,6 +164,8 @@ def _build_argv(payload: dict[str, Any], *, output_path: Path, schematic_path: P
         "--initial-indices-source", payload.get("initial_indices_source", "verified"),
         "--pvt-condition-set", payload["pvt_condition_set"],
         "--trade-off-preference", payload["trade_off_preference"],
+        "--channel", channel_path,
+        "--channel-ports", *(str(port) for port in channel_ports),
         "--output", str(output_path),
         "--export-schematic", str(schematic_path),
     ]
@@ -677,6 +686,13 @@ INDEX_HTML = r"""<!doctype html>
         <option value="synthetic">Synthetic (no SPICE -- fast dry run)</option>
         <option value="real">Real ngspice (slow, actual SPICE)</option>
       </select>
+      <label for="channelId">Four-port channel</label>
+      <select id="channelId">
+        <option value="synthetic">Synthetic regression — software tests only</option>
+        <option value="ieee802_reference">IEEE/IBM lossy THRU — public reference, −6.31 dB at 2.5 GHz</option>
+      </select>
+      <p class="hint">The IEEE/IBM model is a qualified, realistic reference path for training and comparison.
+        It is not PCI-SIG compliance evidence. Port map 1/3 → 2/4 is applied automatically.</p>
       <label for="checkpoint">PPO checkpoint</label>
       <select id="checkpoint"><option value="">(untrained policy -- synthetic backend only)</option></select>
       <label for="rlVersion">PPO version</label>
@@ -848,6 +864,7 @@ function buildPayload() {
   const payload = {
     target_mode: targetMode,
     backend: $('backend').value,
+    channel_id: $('channelId').value,
     rl_version: $('rlVersion').value,
     evaluation_cache: $('evaluationCache').checked,
     checkpoint: $('checkpoint').value || null,
@@ -923,6 +940,7 @@ function renderResult(payload) {
     `<div><div class="k">Candidates generated</div><div class="v">${result.n_candidates_generated}</div></div>` +
     `<div><div class="k">Nominally feasible</div><div class="v">${result.n_nominally_feasible}</div></div>` +
     `<div><div class="k">Backend</div><div class="v">${result.backend}</div></div>` +
+    `<div><div class="k">Channel loss @ 2.5 GHz</div><div class="v">${result.channel ? result.channel.metrics.channel_loss_2p5ghz_db.toFixed(2)+' dB' : 'n/a'}</div></div>` +
     `<div><div class="k">PPO version</div><div class="v">${result.rl_version || 'v1'}</div></div>` +
     `<div><div class="k">Elapsed</div><div class="v">${payload.elapsed_s}s</div></div>`;
 

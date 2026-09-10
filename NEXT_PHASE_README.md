@@ -40,7 +40,10 @@ physical circuit completion and final experimental validation are approximately
 - The sampler/DFE remains behavioral rather than a complete physical
   transistor-level implementation.
 - Total circuit area is not computable; only partial MOS channel area is known.
-- The final PCIe `.s4p` channel has not been selected or qualified.
+- A public lossy reference `.s4p` channel is integrated and passes the
+  project's deterministic parser, 50-ohm, bandwidth, passivity and causality
+  gates. It is IEEE 802.3 experimental backplane data, not PCI-SIG compliance
+  evidence; see `channels/ieee802_ibm_20db_thru.json`.
 - The documented 27-point result covers TT/SS/FF, not the promised five process
   corners TT/SS/FF/SF/FS or the available full 60-condition grid.
 - PPO has not been shown to outperform Random Search or CEM under matched,
@@ -52,8 +55,8 @@ physical circuit completion and final experimental validation are approximately
 
 ## Current implementation scope
 
-Implement everything below **except final `.s4p` channel integration**, which
-is intentionally deferred until a documented channel file is supplied.
+Implement everything below. The public reference channel is now available for
+development and training; final PCIe compliance evidence remains separate.
 
 ### 1. Expanded physical parameter schema
 
@@ -114,13 +117,14 @@ is intentionally deferred until a documented channel file is supplied.
 - Add a minimal real-ngspice geometry sensitivity test when the local PDK is
   available.
 
-## Deferred `.s4p` channel work
+## `.s4p` channel status
 
-When a candidate channel is supplied, separately verify port order, reference
-impedance, frequency coverage, fixture/de-embedding status, differential
-insertion loss at 2.5 GHz, passivity, causality, delay and mode conversion.
-The final training campaign must use the qualified channel; connector-only
-models may be used for integration testing but not called a complete PCIe link.
+The integrated IEEE/IBM reference channel is available as
+`channels/ieee802_ibm_20db_thru.s4p` with port map `1 3 2 4`. Its source,
+checksum, qualification values and limitations are recorded in the adjacent
+JSON. It is a complete lossy THRU path and materially more useful than a
+connector/package-only model, but a project-specific or PCI-SIG-backed channel
+is still required before making PCIe compliance claims.
 
 ## Teammate training contract
 

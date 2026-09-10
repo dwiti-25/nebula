@@ -26,6 +26,7 @@ from simulator.waveform import Trace, integrated_input_noise, parse_wrdata
 
 ROOT = Path(__file__).resolve().parents[1]
 CHANNEL = ROOT / "channels" / "synthetic_regression.s4p"
+IEEE_REFERENCE_CHANNEL = ROOT / "channels" / "ieee802_ibm_20db_thru.s4p"
 WRDATA = ROOT / "circuits" / "test" / "wrdata.cir"
 
 
@@ -50,6 +51,33 @@ class ChannelTests(unittest.TestCase):
         output = filter_channel(channel, stimulus.time_s, stimulus.differential_v)
         self.assertEqual(len(output), len(stimulus.differential_v))
         self.assertTrue(np.isfinite(output).all())
+
+    def test_touchstone_four_port_matrix_is_read_row_by_row(self):
+        # An asymmetric matrix catches the transpose error that reciprocal
+        # regression channels cannot expose.  Touchstone N-port full matrices
+        # are serialized as S11, S12 ... S1N, S21 ... SNN.
+        values = []
+        for destination in range(4):
+            for source in range(4):
+                values.extend((10 * (destination + 1) + source + 1, 0))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "asymmetric.s4p"
+            path.write_text(
+                "# Hz S RI R 50\n1e9 " + " ".join(map(str, values)) + "\n",
+                encoding="utf-8",
+            )
+            matrix = load_s4p(path).matrix[0]
+        self.assertEqual(matrix[0, 1], 12 + 0j)  # S12
+        self.assertEqual(matrix[1, 0], 21 + 0j)  # S21
+
+    def test_ieee_reference_channel_uses_qualified_port_map(self):
+        from simulator.channel import ChannelPortMap, validate_s4p_channel
+
+        metrics = validate_s4p_channel(load_s4p(
+            IEEE_REFERENCE_CHANNEL, port_map=ChannelPortMap(1, 3, 2, 4),
+        ))
+        self.assertAlmostEqual(metrics["channel_loss_2p5ghz_db"], -6.3123, places=3)
+        self.assertLess(metrics["channel_negative_time_energy_ratio"], 0.05)
 
 
 class ReceiverMetricTests(unittest.TestCase):

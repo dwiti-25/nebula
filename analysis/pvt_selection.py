@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 from simulator.config import SimulationConditions
 from simulator.receiver import EvaluationFidelity, ReceiverParameters, evaluate_pvt_grid
@@ -114,6 +114,7 @@ def run_pvt_evaluation(
     *,
     fidelity: EvaluationFidelity = EvaluationFidelity.FINAL,
     target: Optional[TargetSpec] = None,
+    evaluator_kwargs: Mapping[str, Any] | None = None,
 ) -> PVTRobustnessResult:
     """Actually spends real SPICE: runs the EXISTING, unmodified
     evaluate_pvt_grid for one candidate design against the given condition
@@ -122,7 +123,10 @@ def run_pvt_evaluation(
     """
 
     parameters = ReceiverParameters(**design.parameters)
-    evaluations = evaluate_pvt_grid(parameters, conditions=conditions, fidelity=fidelity)
+    evaluations = evaluate_pvt_grid(
+        parameters, conditions=conditions, fidelity=fidelity,
+        **dict(evaluator_kwargs or {}),
+    )
     points = []
     for condition, evaluation in zip(conditions, evaluations):
         metrics = dict(evaluation.metrics)

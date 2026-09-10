@@ -85,8 +85,24 @@ class ValidateRequestTests(unittest.TestCase):
         problems = web_ui._validate_request(self._base(pvt_condition_set="full60"))
         self.assertTrue(any("pvt_condition_set" in p for p in problems))
 
+    def test_unknown_channel_is_rejected(self):
+        problems = web_ui._validate_request(self._base(channel_id="not-a-channel"))
+        self.assertTrue(any("channel_id" in p for p in problems))
+
 
 class BuildArgvTests(unittest.TestCase):
+    def test_reference_channel_adds_path_and_qualified_port_map(self):
+        argv = web_ui._build_argv(
+            {"target_mode": "trivial", "backend": "synthetic", "episodes": 1, "horizon": 1,
+             "pvt_condition_set": "none", "trade_off_preference": "most_robust",
+             "channel_id": "ieee802_reference"},
+            output_path=Path("/tmp/x.json"), schematic_path=Path("/tmp/x.spice"),
+        )
+        channel_index = argv.index("--channel")
+        ports_index = argv.index("--channel-ports")
+        self.assertEqual(argv[channel_index + 1], "channels/ieee802_ibm_20db_thru.s4p")
+        self.assertEqual(argv[ports_index + 1:ports_index + 5], ["1", "3", "2", "4"])
+
     def test_trivial_preset_uses_target_mode_flag(self):
         argv = web_ui._build_argv(
             {"target_mode": "trivial", "backend": "synthetic", "episodes": 3, "horizon": 4,

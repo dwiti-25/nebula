@@ -29,3 +29,4 @@ venv/
 .ciel/
 .local-pdk/
 local_backup/
+external/channel_candidates/
