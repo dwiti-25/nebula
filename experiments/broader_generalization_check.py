@@ -87,16 +87,22 @@ def _main() -> int:
     parser.add_argument("--randomize-initial-state", action="store_true", default=True)
     parser.add_argument("--max-evaluations", type=int, default=200)
     parser.add_argument("--output", type=Path, required=True)
+    from rl.runtime_contract import add_channel_arguments, channel_kwargs
+    parser.add_argument("--rl-version", choices=("v1", "v2", "v3"), default="v1")
+    add_channel_arguments(parser)
     args = parser.parse_args()
 
     if args.output.exists():
         raise FileExistsError(f"refusing to overwrite existing {args.output}")
 
-    policy_state = torch.load(args.checkpoint, weights_only=True)
-    grids = build_parameter_grids(args.grid_points, spacing=args.grid_spacing)
+    from rl.evaluation_runtime import load_evaluation_policy
+    policy_state, grids, agent = load_evaluation_policy(args.checkpoint, version=args.rl_version,
+        grid_points=args.grid_points, grid_spacing=args.grid_spacing, seed=args.agent_seed, channel_kwargs=channel_kwargs(args))
     initial_indices = verified_initial_indices(grids)
-    adapter = ReceiverRLAdapter(budget=RLBudget(args.max_evaluations), seed=args.eval_seed)
-    agent = PPOAgent(state_dim=STATE_DIM, num_heads=len(PARAMETER_NAMES), seed=args.agent_seed)
+    adapter = ReceiverRLAdapter(budget=RLBudget(args.max_evaluations), seed=args.eval_seed, version=args.rl_version, evaluator_kwargs=channel_kwargs(args))
+    from analysis.run_graph import RunGraph, ACTIVE
+    graph = RunGraph({"backend": "real", "algorithm": "held_out_evaluation", "version": args.rl_version, "checkpoint": str(args.checkpoint)}, args.output.with_suffix(".graph.json"))
+    token = ACTIVE.set(graph)
 
     results: dict[str, object] = {}
     output_rows: list[dict[str, object]] = []
@@ -106,7 +112,7 @@ def _main() -> int:
             label=name, policy_state=policy_state, agent=agent, adapter=adapter,
             training_pool=(target,), initial_indices=initial_indices, grids=grids,
             horizon=args.horizon, randomize_initial_state=args.randomize_initial_state,
-            seed=args.eval_seed, episodes=args.episodes,
+            seed=args.eval_seed, episodes=args.episodes, rl_version=args.rl_version,
         )
         results[name] = {
             "target": target.as_dict(), "satisfaction_rate": summary["satisfaction_rate"],
@@ -124,7 +130,7 @@ def _main() -> int:
         "grid_points": args.grid_points, "grid_spacing": args.grid_spacing,
         "targets": {name: t.as_dict() for name, t in HELD_OUT_TARGETS.items()},
         "results": results,
-        "total_evaluations": adapter.total_evaluations,
+        "total_evaluations": graph.count,
         "wall_clock_s": elapsed_s,
         # comparison point: the existing single-target generalization result (docs sec 18)
         "existing_midpoint_generalization_reference": {
@@ -140,6 +146,8 @@ def _main() -> int:
         stream.write(json.dumps(summary_record) + "\n")
 
     print(json.dumps(summary_record, indent=2))
+    graph.finish(summary_record)
+    ACTIVE.reset(token)
     return 0
 
 

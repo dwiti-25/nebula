@@ -24,7 +24,7 @@ from .provenance import (
 )
 from .receiver_metrics import (
     apply_hybrid_one_tap_dfe, choose_sampling_phase, dfe_eye_metrics,
-    eye_metrics, expected_signs,
+    eye_metrics, expected_signs, sample_at_phase,
 )
 from .stimulus import NRZStimulusConfig, generate_nrz, stimulus_include
 from .waveform import ac_metrics, hd3_db, integrated_input_noise, parse_wrdata, require_numpy
@@ -416,7 +416,7 @@ def _run_channel_diagnostics(channel_path: str | Path,
 
 
 def _run_transient(parameters, conditions, model, ngspice, fidelity, channel_path,
-                   port_map: ChannelPortMap = ChannelPortMap()) -> StageResult:
+                   port_map: ChannelPortMap = ChannelPortMap(), eye_capture: dict | None = None) -> StageResult:
     numpy = require_numpy()
     stimulus = generate_nrz(_transient_config(fidelity, conditions))
     channel = load_s4p(channel_path, port_map=port_map)
@@ -510,6 +510,47 @@ def _run_transient(parameters, conditions, model, ngspice, fidelity, channel_pat
             "transient_average_power_w": float(-numpy.mean(supply_current[valid_time]) * conditions.supply_v),
             "transient_supply_v": conditions.supply_v,
         }
+        if eye_capture is not None:
+            # Capture bounded, measured data only when explicitly requested.
+            # Training never passes this object, so its simulator work and
+            # event size remain unchanged.
+            raw_traces = []
+            for bit in range(measurement_start, min(measurement_stop - 1, measurement_start + 48), 2):
+                start_s = bit * stimulus.config.ui_s
+                mask = (shifted_time >= start_s) & (shifted_time <= start_s + 2 * stimulus.config.ui_s)
+                if numpy.any(mask):
+                    raw_traces.append({
+                        "phase_ui": ((shifted_time[mask] - start_s) / stimulus.config.ui_s).tolist(),
+                        "voltage_v": vout[mask].tolist(),
+                    })
+            dfe_points = []
+            for phase_s in numpy.arange(stimulus.config.time_step_s, stimulus.config.ui_s,
+                                        4 * stimulus.config.time_step_s):
+                raw_phase = sample_at_phase(
+                    shifted_time, vout, len(aligned_bits), stimulus.config.ui_s, float(phase_s),
+                ).raw_samples_v
+                phase_dfe = apply_hybrid_one_tap_dfe(
+                    raw_phase, aligned_bits, parameters.dfe_tap_v, training_stop,
+                )
+                stop = min(measurement_stop, len(phase_dfe.corrected_samples_v))
+                for value, expected in zip(
+                    phase_dfe.corrected_samples_v[measurement_start:stop],
+                    aligned_bits[measurement_start:stop],
+                ):
+                    dfe_points.append({"phase_ui": float(phase_s / stimulus.config.ui_s),
+                                       "voltage_v": float(value), "expected_bit": int(expected)})
+            eye_capture.update({
+                "schema_version": 1, "plot_semantics": {
+                    "ctle": "continuous transistor-level CTLE differential output folded over two UI",
+                    "dfe": "behavioral one-tap DFE corrected samples across sampling phases; not a transistor-level DFE waveform",
+                },
+                "conditions": conditions.to_dict(), "fidelity": fidelity.name.lower(),
+                "channel": {"path": str(Path(channel_path).resolve()), "checksum": channel.checksum,
+                            "port_map": asdict(port_map)},
+                "parameters": asdict(parameters), "stimulus": asdict(stimulus.config),
+                "metrics": dict(metrics), "ctle_traces": raw_traces, "dfe_points": dfe_points,
+                "locked_phase_ui": sampling.phase_ui,
+            })
     except (KeyError, ValueError, RuntimeError) as exc:
         return StageResult("transient", False, result.runtime_s,
                            failure_code=FailureCode.WAVEFORM_PARSE_ERROR.value,
@@ -566,6 +607,7 @@ def evaluate_receiver(
     sky130: Sky130Config | None = None,
     ngspice: NgSpiceConfig | None = None,
     cache: EvaluationCache | None = None,
+    eye_capture: dict | None = None,
 ) -> ReceiverEvaluation:
     started_stages: list[StageResult] = []
     effective_ngspice = ngspice or NgSpiceConfig(
@@ -637,7 +679,7 @@ def evaluate_receiver(
         "fidelity": fidelity.name, **provenance,
     })
     invalid_cached_entry = False
-    if cache:
+    if cache and eye_capture is None:
         cached = cache.get(evaluation_id)
         if cached is not None:
             try:
@@ -657,12 +699,16 @@ def evaluate_receiver(
                                         fidelity >= EvaluationFidelity.FINAL)))
     if fidelity >= EvaluationFidelity.TRAINING:
         runners.append(lambda: _run_transient(parameters, conditions, model, effective_ngspice,
-                                              fidelity, channel_path, channel_port_map))
+                                              fidelity, channel_path, channel_port_map, eye_capture))
     combined: dict[str, float] = {}
     failed_stage: str | None = None
     for runner in runners:
         try:
-            stage = runner()
+            from .runtime import expired
+            stage = (StageResult("budget", False, 0.0,
+                     failure_code=FailureCode.NGSPICE_TIMEOUT.value,
+                     retryable=True,
+                     errors=("Wall-clock evaluation deadline reached",)) if expired() else runner())
         except Exception as exc:
             stage = StageResult(
                 "internal", False, 0.0,

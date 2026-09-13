@@ -11,6 +11,8 @@ in the report is traceable back to a real SPICE evaluation, not asserted.
 from __future__ import annotations
 
 import json
+import math
+from numbers import Real
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -19,6 +21,8 @@ from analysis.area_estimate import estimate_ctle_area
 from analysis.pvt_selection import PVTRobustnessResult, load_pvt_results_from_jsonl
 from analysis.target_assessment import assess_target
 from rl.target_spec import TargetSpec
+from simulator.config import QUALIFICATION_PVT_GRID as PVT_GRID
+from simulator.receiver import ReceiverParameters
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,8 @@ class SpecRow:
 def _gate(value: Optional[float], *, minimum: Optional[float] = None, maximum: Optional[float] = None) -> str:
     if value is None:
         return "NOT CLAIMED"
+    if not isinstance(value, Real) or isinstance(value, bool) or not math.isfinite(value):
+        return "FAIL"
     if minimum is not None and value < minimum:
         return "FAIL"
     if maximum is not None and value > maximum:
@@ -56,17 +62,20 @@ def build_final_specification_report(
     analysis.pvt_selection -- never computed automatically here).
     """
 
-    area = estimate_ctle_area()
+    area = estimate_ctle_area(parameters=ReceiverParameters(**parameters))
     effective_target = target or TargetSpec.from_existing_thresholds()
     target_assessment = assess_target(nominal_metrics, effective_target, simulator_success=True)
 
     def metric(name: str) -> Optional[float]:
-        return nominal_metrics.get(name)
+        value = nominal_metrics.get(name)
+        if value is None:
+            return None
+        return value if isinstance(value, Real) and not isinstance(value, bool) else float("nan")
 
     rows = [
         SpecRow(
             "Eye width (UI)", f"{metric('dfe_eye_width_ui'):.4g}" if metric("dfe_eye_width_ui") is not None else None,
-            "> 0.4 UI", _gate(metric("dfe_eye_width_ui"), minimum=0.4), nominal_source,
+            "> 0.4 UI", _gate(metric("dfe_eye_width_ui"), minimum=math.nextafter(0.4, math.inf)), nominal_source,
         ),
         SpecRow(
             "Eye height (V)",
@@ -74,15 +83,15 @@ def build_final_specification_report(
             "> 0.1 V (this repo's own EXISTING_THRESHOLDS value -- the official "
             "slide's exact mV figure was not independently re-verified against "
             "this number in this pass; see docs/autockt-mapping.md sec 21)",
-            _gate(metric("dfe_locked_phase_eye_height_v"), minimum=0.1), nominal_source,
+            _gate(metric("dfe_locked_phase_eye_height_v"), minimum=math.nextafter(0.1, math.inf)), nominal_source,
         ),
         SpecRow(
             "Margin (V)", f"{metric('dfe_min_margin_v'):.4g}" if metric("dfe_min_margin_v") is not None else None,
-            "> 0 V", _gate(metric("dfe_min_margin_v"), minimum=0.0), nominal_source,
+            "> 0 V", _gate(metric("dfe_min_margin_v"), minimum=math.nextafter(0.0, math.inf)), nominal_source,
         ),
         SpecRow(
             "Power (W)", f"{metric('ctle_power_w'):.4g}" if metric("ctle_power_w") is not None else None,
-            "< 0.015 W (15 mW)", _gate(metric("ctle_power_w"), maximum=0.015), nominal_source,
+            "0 < power < 0.015 W (15 mW)", _gate(metric("ctle_power_w"), minimum=math.nextafter(0.0, math.inf), maximum=math.nextafter(0.015, -math.inf)), nominal_source,
         ),
         SpecRow(
             "Peaking (dB)", f"{metric('peaking_db'):.4g}" if metric("peaking_db") is not None else None,
@@ -91,13 +100,14 @@ def build_final_specification_report(
         ),
         SpecRow(
             "HD3 (dB)", f"{metric('hd3_db'):.4g}" if metric("hd3_db") is not None else None,
-            "< -30 dB", _gate(metric("hd3_db"), maximum=-30.0), nominal_source,
+            "< -30 dB", _gate(metric("hd3_db"), maximum=math.nextafter(-30.0, -math.inf)), nominal_source,
         ),
         SpecRow(
             "Input-referred noise (Vrms)",
             f"{metric('input_referred_noise_vrms'):.4g}" if metric("input_referred_noise_vrms") is not None else None,
             "< 0.0015 Vrms (1.5 mV)",
-            _gate(metric("input_referred_noise_vrms"), maximum=0.0015), nominal_source,
+            _gate(metric("input_referred_noise_vrms"), minimum=math.nextafter(0.0, math.inf),
+                  maximum=math.nextafter(0.0015, -math.inf)), nominal_source,
         ),
         SpecRow(
             "Transistor channel area (mm^2)",
@@ -113,15 +123,20 @@ def build_final_specification_report(
         worst_case = [
             f"{p.process_corner}/{p.supply_v}V/{p.temperature_c}C" for p in pvt_result.worst_case_conditions
         ]
-        pvt_verdict = "PASS" if pvt_result.pass_rate >= 1.0 else "PARTIAL"
+        required = {(c.process_corner.value, c.supply_v, c.temperature_c) for c in PVT_GRID}
+        observed = {(p.process_corner, p.supply_v, p.temperature_c) for p in pvt_result.points}
+        complete = required <= observed
+        all_pass = bool(pvt_result.points) and all(p.success for p in pvt_result.points)
+        pvt_verdict = ("NOT CLAIMED" if not pvt_result.points else
+                       "FAIL" if not all_pass else "PASS" if complete else "NOT CLAIMED")
         rows.append(SpecRow(
             "PVT (pass/total)", f"{pvt_result.n_passing}/{pvt_result.n_conditions}",
-            "TT/SS/FF x VDD+/-5% x 0-125C", pvt_verdict,
-            f"{pvt_result.n_conditions}-point sweep, design_id={pvt_result.design_id}"
+            "TT/SS/FF x 1.71/1.80/1.89 V x 0/27/75/125 C (agreed 36-condition grid)", pvt_verdict,
+            f"{pvt_result.n_conditions}-point sweep, design_id={pvt_result.design_id}; {len(required - observed)} required conditions missing"
             + (f", worst case: {', '.join(worst_case)}" if worst_case else ""),
         ))
     else:
-        rows.append(SpecRow("PVT (pass/total)", None, "TT/SS/FF x VDD+/-5% x 0-125C", "NOT CLAIMED", "no PVT result supplied"))
+        rows.append(SpecRow("PVT (pass/total)", None, "Agreed 36-condition TT/SS/FF grid", "NOT CLAIMED", "no PVT result supplied"))
 
     return {
         "design_id": design_id,

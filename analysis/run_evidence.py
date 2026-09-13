@@ -25,7 +25,7 @@ class JsonlEventWriter:
                 simulator_success=event.get("failure_stage") is None,
             )
             enriched["strict_target_assessment"] = assessment.to_dict()
-            enriched["strict_pass"] = assessment.passed
+            enriched["strict_pass"] = assessment.passed and (event.get("strict_pass") is not False)
             enriched.setdefault("cache_hit", None)
             enriched.setdefault("evaluation_timing_s", None)
             enriched.setdefault("stage_timings_s", None)
@@ -49,19 +49,22 @@ def build_run_dashboard(path: str | Path) -> dict[str, Any]:
     events = load_events(path)
     steps = [event for event in events if event.get("event_type") == "step"]
     updates = [event for event in events if event.get("event_type") == "update"]
+    evaluations = [event for event in events if event.get("event_type") == "evaluation"]
     charts: list[dict[str, Any]] = []
     if steps:
         label = str(steps[0].get("configuration_id", "ppo"))
+        success_count = 0
+        success_rates = []
+        for index, event in enumerate(steps, 1):
+            success_count += bool(event.get("strict_pass"))
+            success_rates.append(success_count / index)
         charts.extend([
             {"id": "run_reward", "title": f"{label} reward progression", "type": "line",
-             "x_label": "cumulative real evaluations", "y_label": "reward",
-             "series": [{"name": label, "values": [event["reward_total"] for event in steps]}]},
+             "x_label": "evaluation requests (reset/cache included)", "y_label": "reward",
+             "series": [{"name": label, "x_values": [event.get("evaluation_count", index) for index, event in enumerate(steps, 1)], "values": [event["reward_total"] for event in steps]}]},
             {"id": "run_strict_success", "title": f"{label} strict success", "type": "line",
-             "x_label": "cumulative real evaluations", "y_label": "cumulative strict-pass rate",
-             "series": [{"name": label, "values": [
-                 sum(bool(row.get("strict_pass")) for row in steps[:index]) / index
-                 for index in range(1, len(steps) + 1)
-             ]}]},
+             "x_label": "policy transitions", "y_label": "cumulative strict-pass rate",
+             "series": [{"name": label, "values": success_rates}]},
         ])
         failures: dict[str, int] = {}
         for event in steps:
@@ -73,9 +76,21 @@ def build_run_dashboard(path: str | Path) -> dict[str, Any]:
     if updates:
         charts.append({"id": "run_ppo_health", "title": "PPO optimization health", "type": "line",
                        "x_label": "update", "y_label": "value",
-                       "series": [{"name": key, "values": [row.get(key, 0) for row in updates]}
+                       "series": [{"name": key, "values": [row.get(key) for row in updates]}
                                   for key in ("policy_loss", "value_loss", "entropy")]})
+    if evaluations:
+        for key, units in (("ctle_power_w", "W"), ("peaking_db", "dB"),
+                           ("dfe_locked_phase_eye_height_v", "V"), ("dfe_eye_width_ui", "UI"),
+                           ("input_referred_noise_vrms", "Vrms"), ("hd3_db", "dB")):
+            values = [row.get("raw_metrics", {}).get(key) for row in evaluations]
+            if any(value is not None for value in values):
+                charts.append({"id": f"run_{key}", "title": key, "type": "line",
+                    "x_label": "evaluation requests (reset/PVT/cache included)", "y_label": units,
+                    "note": "Missing measurements are gaps; synthetic backend values are not SPICE evidence.",
+                    "series": [{"name": key, "values": values}]})
+        charts.append({"id": "run_timing", "title": "Observed evaluation request time", "type": "line",
+            "x_label": "evaluation requests", "y_label": "seconds",
+            "series": [{"name": "elapsed_s", "values": [row.get("elapsed_s") for row in evaluations]}]})
     return {"schema_version": 1, "events": len(events), "charts": charts,
             "metadata": events[0] if events else {},
             "limitations": ["Unavailable historical or backend timing fields remain null; none are inferred."]}
-

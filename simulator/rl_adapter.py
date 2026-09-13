@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import math
 import random
+import time
 from typing import Callable, Mapping, Sequence
 
 from .config import SimulationConditions
@@ -64,11 +65,13 @@ class RLStep:
     info: dict[str, object]
 
 
-def normalized_action_to_parameters(action: Sequence[float]) -> ReceiverParameters:
-    if len(action) != len(ACTION_BOUNDS):
-        raise ValueError(f"action must contain exactly {len(ACTION_BOUNDS)} values")
+def normalized_action_to_parameters(action: Sequence[float], *, version: str = "v1") -> ReceiverParameters:
+    from .design_schema import parameter_bounds
+    bounds = parameter_bounds(version)
+    if len(action) != len(bounds):
+        raise ValueError(f"action must contain exactly {len(bounds)} values")
     values: dict[str, float] = {}
-    for raw, (name, lower, upper, scale) in zip(action, ACTION_BOUNDS):
+    for raw, (name, lower, upper, scale) in zip(action, bounds):
         value = float(raw)
         if not math.isfinite(value) or not -1.0 <= value <= 1.0:
             raise ValueError("normalized actions must be finite and lie in [-1, 1]")
@@ -77,6 +80,10 @@ def normalized_action_to_parameters(action: Sequence[float]) -> ReceiverParamete
             values[name] = math.exp(math.log(lower) + fraction * math.log(upper / lower))
         else:
             values[name] = lower + fraction * (upper - lower)
+    if version == "v3":
+        values["mos_multiplier"] = int(round(values["mos_multiplier"]))
+        values["mos_width_um"] = round(values["mos_width_um"], 3)
+        values["mos_length_um"] = round(values["mos_length_um"], 3)
     return ReceiverParameters(**values)
 
 
@@ -150,7 +157,15 @@ class ReceiverRLAdapter:
         budget: RLBudget = RLBudget(),
         seed: int = 0,
         evaluator_kwargs: Mapping[str, object] | None = None,
+        version: str = "v1",
+        grids=None,
     ):
+        from .design_schema import parameter_bounds
+        self.version = version
+        self.grids = grids
+        self.evaluation_phase = "candidate"
+        self.action_bounds = parameter_bounds(version)
+        self.last_evaluation = None
         self.evaluator = evaluator
         self.conditions = conditions
         if fidelity < EvaluationFidelity.TRAINING:
@@ -172,23 +187,31 @@ class ReceiverRLAdapter:
         self.evaluations = 0
         return ((0.0,) * len(OBSERVATION_NAMES), {
             "seed": self.seed_value,
-            "action_schema_version": ACTION_SCHEMA_VERSION,
+            "action_schema_version": 3 if self.version == "v3" else ACTION_SCHEMA_VERSION,
             "observation_schema_version": OBSERVATION_SCHEMA_VERSION,
             "reward_version": REWARD_VERSION,
         })
 
     def sample_action(self) -> tuple[float, ...]:
-        return tuple(self.random.uniform(-1.0, 1.0) for _ in ACTION_BOUNDS)
+        return tuple(self.random.uniform(-1.0, 1.0) for _ in self.action_bounds)
 
     def step(self, action: Sequence[float]) -> RLStep:
         if self.total_evaluations >= self.budget.max_evaluations:
             raise RuntimeError(
                 "RL evaluation budget exhausted; create a new adapter or increase its configured budget"
             )
-        parameters = normalized_action_to_parameters(action)
+        parameters = normalized_action_to_parameters(action, version=self.version)
+        if self.grids is not None:
+            from rl.parameter_grid import quantize_parameters
+            parameters = quantize_parameters(parameters, self.grids)
+        started = time.perf_counter()
         evaluation = self.evaluator(
             parameters, self.conditions, self.fidelity, **self.evaluator_kwargs,
         )
+        elapsed_s = time.perf_counter() - started
+        from analysis.run_graph import observe
+        observe(evaluation, phase=self.evaluation_phase, elapsed_s=elapsed_s)
+        self.last_evaluation = evaluation
         self.evaluations += 1
         self.total_evaluations += 1
         truncated = self.total_evaluations >= self.budget.max_evaluations
@@ -204,10 +227,13 @@ class ReceiverRLAdapter:
                 "total_evaluation_count": self.total_evaluations,
                 # Preserve the v1/v2 five-parameter event contract exactly.
                 # Expanded MOS sizing uses a separately versioned adapter/schema.
-                "parameters": {name: getattr(parameters, name) for name in LEGACY_PARAMETER_NAMES},
+                "parameters": {name: getattr(parameters, name) for name, *_ in self.action_bounds},
                 "reward_version": REWARD_VERSION,
-                "action_schema_version": ACTION_SCHEMA_VERSION,
+                "action_schema_version": 3 if self.version == "v3" else ACTION_SCHEMA_VERSION,
                 "observation_schema_version": OBSERVATION_SCHEMA_VERSION,
                 "failure_stage": evaluation.failed_stage,
+                "raw_metrics": dict(evaluation.metrics),
+                "cache_hit": evaluation.cache_hit,
+                "runtime_s": elapsed_s,
             },
         )

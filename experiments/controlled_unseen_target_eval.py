@@ -67,13 +67,15 @@ def run_controlled_evaluation(
     eval_seed: int,
     agent_seed: int,
     episodes: int = MATCHED_EPISODES,
+    rl_version: str = "v1",
 ) -> dict[str, Any]:
     """Runs the matched initial-vs-final comparison and returns the full
     numerical result (per-case rows plus aggregate win/tie/loss counts).
     Does not write to disk; callers handle persistence.
     """
 
-    agent = PPOAgent(state_dim=STATE_DIM, num_heads=len(PARAMETER_NAMES), seed=agent_seed)
+    from rl.runtime_contract import STATE_DIMS
+    agent = PPOAgent(state_dim=STATE_DIMS[rl_version], num_heads=len(grids), seed=agent_seed)
 
     common_kwargs = dict(
         adapter=adapter,
@@ -83,7 +85,7 @@ def run_controlled_evaluation(
         horizon=horizon,
         randomize_initial_state=True,
         seed=eval_seed,
-        episodes=episodes,
+        episodes=episodes, rl_version=rl_version,
     )
 
     initial_summary, initial_rows = _evaluate_checkpoint(
@@ -179,32 +181,41 @@ def _main() -> int:
     parser.add_argument("--episodes", type=int, default=MATCHED_EPISODES)
     parser.add_argument("--max-evaluations", type=int, default=200)
     parser.add_argument("--output", type=Path, required=True)
+    from rl.runtime_contract import add_channel_arguments, channel_kwargs, STATE_DIMS
+    parser.add_argument("--rl-version", choices=("v1", "v2", "v3"), default="v1")
+    add_channel_arguments(parser)
     args = parser.parse_args()
 
     if args.output.exists():
         raise FileExistsError(f"refusing to overwrite existing {args.output}")
 
+    from rl.evaluation_runtime import load_evaluation_policy
+    final_policy_state, grids, _ = load_evaluation_policy(args.final_checkpoint, version=args.rl_version,
+        grid_points=args.grid_points, grid_spacing=args.grid_spacing, seed=args.agent_seed, channel_kwargs=channel_kwargs(args))
     if args.initial_checkpoint is not None:
-        initial_policy_state = torch.load(args.initial_checkpoint, weights_only=True)
+        initial_policy_state, initial_grids, _ = load_evaluation_policy(args.initial_checkpoint, version=args.rl_version,
+            grid_points=args.grid_points, grid_spacing=args.grid_spacing, seed=args.agent_seed, channel_kwargs=channel_kwargs(args))
+        if initial_grids != grids:
+            raise ValueError("Matched checkpoint evaluation requires identical physical grids")
     else:
         # Deterministic, reproducible pre-training policy -- identical to
         # what experiments/train_autockt.py's own initial_policy_state was
         # before any PPO update, for the same --agent-seed.
         initial_policy_state = PPOAgent(
-            state_dim=STATE_DIM, num_heads=len(PARAMETER_NAMES), seed=args.agent_seed,
+            state_dim=STATE_DIMS[args.rl_version], num_heads=len(grids), seed=args.agent_seed,
         ).policy.state_dict()
-    final_policy_state = torch.load(args.final_checkpoint, weights_only=True)
-
-    grids = build_parameter_grids(args.grid_points, spacing=args.grid_spacing)
+    from analysis.run_graph import RunGraph, ACTIVE
+    graph = RunGraph({"backend": "real", "algorithm": "matched_checkpoint_evaluation", "version": args.rl_version}, args.output.with_suffix(".graph.json"))
+    token = ACTIVE.set(graph)
     initial_indices = verified_initial_indices(grids)
-    adapter = ReceiverRLAdapter(budget=RLBudget(args.max_evaluations), seed=args.eval_seed)
+    adapter = ReceiverRLAdapter(budget=RLBudget(args.max_evaluations), seed=args.eval_seed, version=args.rl_version, evaluator_kwargs=channel_kwargs(args))
 
     result = run_controlled_evaluation(
         initial_policy_state=initial_policy_state, final_policy_state=final_policy_state,
         adapter=adapter, grids=grids, initial_indices=initial_indices, horizon=args.horizon,
-        eval_seed=args.eval_seed, agent_seed=args.agent_seed, episodes=args.episodes,
+        eval_seed=args.eval_seed, agent_seed=args.agent_seed, episodes=args.episodes, rl_version=args.rl_version,
     )
-    result["total_evaluations"] = adapter.total_evaluations
+    result["total_evaluations"] = graph.count
     result["initial_checkpoint_source"] = (
         str(args.initial_checkpoint) if args.initial_checkpoint is not None
         else f"fresh PPOAgent(seed={args.agent_seed}) -- not loaded from any file"
@@ -219,6 +230,8 @@ def _main() -> int:
         stream.write(json.dumps({"row_type": "summary", **summary_row}) + "\n")
 
     print(json.dumps({k: v for k, v in result.items() if k != "cases"}, indent=2))
+    graph.finish(result)
+    ACTIVE.reset(token)
     return 0
 
 

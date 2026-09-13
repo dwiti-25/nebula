@@ -36,6 +36,7 @@ from .autockt_reward import AUTOCKT_REWARD_VERSION
 from .autockt_reward_v2 import REWARD_V2_VERSION
 from .autockt_state import STATE_DIM as STATE_DIM_V1
 from .autockt_state_v2 import STATE_DIM_V2
+from .autockt_v3 import STATE_DIM_V3
 from .ppo_agent import PPOAgent
 
 try:
@@ -45,8 +46,8 @@ except ImportError:  # pragma: no cover -- numpy is a hard project dependency in
 
 CHECKPOINT_SCHEMA_VERSION = 1
 
-REWARD_SCHEMA_VERSIONS = {"v1": AUTOCKT_REWARD_VERSION, "v2": REWARD_V2_VERSION}
-STATE_SCHEMA_DIMS = {"v1": STATE_DIM_V1, "v2": STATE_DIM_V2}
+REWARD_SCHEMA_VERSIONS = {"v1": AUTOCKT_REWARD_VERSION, "v2": REWARD_V2_VERSION, "v3": "reward_v3"}
+STATE_SCHEMA_DIMS = {"v1": STATE_DIM_V1, "v2": STATE_DIM_V2, "v3": STATE_DIM_V3}
 
 
 class CheckpointIncompatibleError(ValueError):
@@ -78,7 +79,8 @@ def _rng_states() -> dict[str, Any]:
         "torch_random_state": torch.get_rng_state(),
     }
     if numpy is not None:
-        state["numpy_random_state"] = numpy.random.get_state()
+        name, keys, pos, has_gauss, cached = numpy.random.get_state()
+        state["numpy_random_state"] = (name, keys.tolist(), pos, has_gauss, cached)
     return state
 
 
@@ -88,7 +90,8 @@ def _restore_rng_states(state: dict[str, Any]) -> None:
     if "torch_random_state" in state:
         torch.set_rng_state(state["torch_random_state"])
     if numpy is not None and "numpy_random_state" in state:
-        numpy.random.set_state(state["numpy_random_state"])
+        name, keys, pos, has_gauss, cached = state["numpy_random_state"]
+        numpy.random.set_state((name, numpy.asarray(keys, dtype=numpy.uint32), pos, has_gauss, cached))
 
 
 def save_full_checkpoint(
@@ -118,7 +121,7 @@ def save_full_checkpoint(
     }
     metadata = CheckpointMetadata(
         checkpoint_schema_version=CHECKPOINT_SCHEMA_VERSION,
-        state_schema=state_schema, action_schema_version=ACTION_SCHEMA_VERSION, reward_schema=reward_schema,
+        state_schema=state_schema, action_schema_version=3 if state_schema == "v3" else ACTION_SCHEMA_VERSION, reward_schema=reward_schema,
         update_count=update_count, evaluation_count=evaluation_count,
         hyperparameters=hyperparameters,
         parameter_grid={"grid_points": grid_points, "grid_spacing": grid_spacing},
@@ -138,6 +141,7 @@ def save_full_checkpoint(
 
 def load_full_checkpoint(
     path: str | Path, *, agent: PPOAgent, state_schema: str, reward_schema: str, restore_rng: bool = True,
+    expected_contract=None,
 ) -> CheckpointMetadata:
     """Loads a full checkpoint INTO `agent` in place (policy, value net,
     optimizer, and -- unless restore_rng=False -- Python/NumPy/PyTorch RNG
@@ -147,7 +151,7 @@ def load_full_checkpoint(
     weights shaped for a different state/action/reward configuration.
     """
 
-    payload = torch.load(path, weights_only=False)
+    payload = torch.load(path, weights_only=state_schema == "v3")
     metadata = CheckpointMetadata(**payload["metadata"])
 
     if metadata.hyperparameters.get("state_dim") != agent.state_dim:
@@ -171,6 +175,31 @@ def load_full_checkpoint(
             f"but reward_schema={reward_schema!r} was requested"
         )
 
+    if state_schema == "v3":
+        from .runtime_contract import validate_inference_contract
+        contract = metadata.hyperparameters.get("runtime_contract")
+        if expected_contract is None or contract != expected_contract:
+            raise CheckpointIncompatibleError("v3 resume requires identical runtime contract (grids, backend and channel)")
+        validate_inference_contract(contract, expected_contract)
+    # Validate both weight sets before mutating either live network.
+    for network, key in ((agent.policy, "policy_state_dict"), (agent.value_net, "value_state_dict")):
+        current = network.state_dict()
+        saved = payload.get(key, {})
+        if current.keys() != saved.keys() or any(current[k].shape != saved[k].shape for k in current):
+            raise CheckpointIncompatibleError(f"Invalid {key} shapes/keys")
+    import copy
+    staged = copy.deepcopy(agent)
+    staged.policy.load_state_dict(payload["policy_state_dict"])
+    staged.value_net.load_state_dict(payload["value_state_dict"])
+    staged.optimizer.load_state_dict(payload["optimizer_state_dict"])
+    if restore_rng:
+        if "python_random_state" in payload:
+            random.Random().setstate(payload["python_random_state"])
+        if "torch_random_state" in payload:
+            torch.Generator().set_state(payload["torch_random_state"])
+        if numpy is not None and "numpy_random_state" in payload:
+            name, keys, pos, has_gauss, cached = payload["numpy_random_state"]
+            numpy.random.RandomState().set_state((name, numpy.asarray(keys, dtype=numpy.uint32), pos, has_gauss, cached))
     agent.policy.load_state_dict(payload["policy_state_dict"])
     agent.value_net.load_state_dict(payload["value_state_dict"])
     agent.optimizer.load_state_dict(payload["optimizer_state_dict"])
@@ -179,7 +208,7 @@ def load_full_checkpoint(
     return metadata
 
 
-def export_inference_only(path: str | Path, *, agent: PPOAgent) -> None:
+def export_inference_only(path: str | Path, *, agent: PPOAgent, metadata=None) -> None:
     """A bare policy.state_dict() -- byte-for-byte the same format
     experiments/train_autockt.py::--save-final-policy already produces
     (torch.save(agent.policy.state_dict(), path)), compatible with the
@@ -187,4 +216,7 @@ def export_inference_only(path: str | Path, *, agent: PPOAgent) -> None:
     """
 
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    torch.save(agent.policy.state_dict(), path)
+    payload = agent.policy.state_dict()
+    if metadata is not None:
+        payload = {"policy_state_dict": payload, "metadata": metadata}
+    torch.save(payload, path)

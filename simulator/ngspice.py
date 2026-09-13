@@ -45,6 +45,8 @@ class NgSpiceConfig:
             raise TypeError("NGSpice timeout must be a number")
         if not math.isfinite(float(self.timeout_s)) or self.timeout_s <= 0:
             raise ValueError("NGSpice timeout must be finite and greater than zero")
+        # Equivalent 180 and 180.0 settings must share provenance/cache keys.
+        object.__setattr__(self, "timeout_s", float(self.timeout_s))
 
     def resolve_executable(self) -> Path:
         requested = self.executable or os.environ.get("NGSPICE_EXECUTABLE")
@@ -317,13 +319,19 @@ def run_simulation(
             if os.name == "nt":
                 child_environment["USERPROFILE"] = str(temp_dir)
             try:
+                from analysis.run_graph import observe_spice_invocation
+                from .runtime import remaining_timeout
+                timeout = remaining_timeout(settings.timeout_s)
+                if timeout <= 0:
+                    raise subprocess.TimeoutExpired(str(executable), 0)
+                observe_spice_invocation(request.parameters)
                 process = subprocess.run(
                     [str(executable), "-b", "-o", str(log_path), str(generated)],
                     cwd=temp_dir,
                     capture_output=True,
                     text=True,
                     errors="replace",
-                    timeout=settings.timeout_s,
+                    timeout=timeout,
                     check=False,
                     env=child_environment,
                 )

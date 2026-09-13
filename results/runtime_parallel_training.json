@@ -1,0 +1,40 @@
+{
+  "runs": [
+    {
+      "workers": 1,
+      "seconds": 15.06127300002845,
+      "success": [
+        true,
+        true
+      ],
+      "failed_stages": [
+        null,
+        null
+      ]
+    },
+    {
+      "workers": 2,
+      "seconds": 9.69572340004379,
+      "success": [
+        true,
+        true
+      ],
+      "failed_stages": [
+        null,
+        null
+      ]
+    }
+  ],
+  "identical_results": true,
+  "fidelity": "TRAINING",
+  "fraction_faster": 0.35624808075482894,
+  "simulator": {
+    "ngspice_executable": "C:\\Vyom\\Spice64\\bin\\ngspice_con.exe",
+    "ngspice_version": "******\n** ngspice-47 : Circuit level simulation program\n** Compiled with KLU Direct Linear Solver\n** The U. C. Berkeley CAD Group\n** Copyright 1985-1994, Regents of the University of California.\n** Copyright 2001-2026, The ngspice team.\n** Please get your ngspice manual from https://ngspice.sourceforge.io/docs.html\n** Please file your bug-reports at https://ngspice.sourceforge.io/bugrep.html\n** Creation Date: Aug 11 2026   13:55:25\n******",
+    "solver": "klu",
+    "initialization_checksum": "758d7344d66a69b9f74fcf2c1d6142cb09be466418afd94904133c44c1850d5f",
+    "timeout_s": 60.0
+  },
+  "model": "C:\\Vyom\\AL Code\\nebula-integration\\.local-pdk\\sky130A\\libs.tech\\ngspice\\sky130.nebula_nfet.lib.spice",
+  "limitation": "Small fixed-order batch, not evidence of better policy accuracy or general speedup."
+}

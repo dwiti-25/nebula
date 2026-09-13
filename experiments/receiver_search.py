@@ -46,10 +46,12 @@ def _sample_actions(
     seed: int,
     policy: str,
     conditions: SimulationConditions,
+    version: str = "v1",
 ) -> list[tuple[float, ...]]:
     """Generate deterministic actions, optionally rejecting obvious Stage-1 dead zones."""
     if policy not in SAMPLING_POLICIES:
         raise ValueError(f"unsupported sampling policy: {policy}")
+    from simulator.design_schema import parameter_bounds
     generator = random.Random(seed)
     actions: list[tuple[float, ...]] = []
     attempts = 0
@@ -57,9 +59,9 @@ def _sample_actions(
         attempts += 1
         if attempts > 1_000_000:
             raise RuntimeError("sampling policy could not produce enough actions")
-        action = tuple(generator.uniform(-1.0, 1.0) for _ in range(len(ACTION_BOUNDS)))
+        action = tuple(generator.uniform(-1.0, 1.0) for _ in range(len(parameter_bounds(version))))
         if policy == "constraint_aware_v1":
-            parameters = normalized_action_to_parameters(action)
+            parameters = normalized_action_to_parameters(action, version=version)
             # First-order resistive-load common-mode estimate.  This rejects
             # combinations that cannot meet the DC headroom gate even before
             # device-model simulation; the evaluator remains authoritative.
@@ -356,7 +358,11 @@ def run_receiver_search(
     cache_path: str | Path | None = ".nebula-cache",
     evaluator: Callable[..., object] = evaluate_receiver,
     evaluator_kwargs: dict[str, object] | None = None,
+    version: str = "v1",
 ) -> list[dict[str, object]]:
+    from simulator.design_schema import parameter_bounds
+    from rl.parameter_grid import build_parameter_grids, quantize_parameters
+    grids = build_parameter_grids(version=version) if version == "v3" else None
     if not 1 <= count <= 500:
         raise ValueError("baseline count must be between 1 and 500")
     if sampling_policy not in SAMPLING_POLICIES:
@@ -389,7 +395,7 @@ def run_receiver_search(
     )
     manifest = {
         "search_schema_version": SEARCH_SCHEMA_VERSION,
-        "action_schema_version": ACTION_SCHEMA_VERSION,
+        "action_schema_version": 3 if version == "v3" else ACTION_SCHEMA_VERSION,
         "observation_schema_version": OBSERVATION_SCHEMA_VERSION,
         "reward_version": REWARD_VERSION,
         "count": count,
@@ -398,7 +404,8 @@ def run_receiver_search(
         "fidelity": fidelity.name.lower(),
         "conditions": conditions.to_dict(),
         "channel_port_map": asdict(channel_port_map),
-        "action_bounds": ACTION_BOUNDS,
+        "action_bounds": parameter_bounds(version),
+        "parameter_grid": {name: list(grid.values) for name, grid in grids.items()} if grids else None,
         "channel_path": str(Path(channel_path).resolve()),
         "channel_checksum": sha256_file(channel_path),
         "python_version": sys.version,
@@ -425,13 +432,15 @@ def run_receiver_search(
     completed = _completed_indices(destination)
     if any(index < 0 or index >= count for index in completed):
         raise ValueError("checkpoint contains an out-of-range candidate index")
-    actions = _sample_actions(count, seed, sampling_policy, conditions)
+    actions = _sample_actions(count, seed, sampling_policy, conditions, version=version)
     rows: list[dict[str, object]] = []
     destination.parent.mkdir(parents=True, exist_ok=True)
     for index, action in enumerate(actions):
         if index in completed:
             continue
-        parameters: ReceiverParameters = normalized_action_to_parameters(action)
+        parameters: ReceiverParameters = normalized_action_to_parameters(action, version=version)
+        if grids:
+            parameters = quantize_parameters(parameters, grids)
         start_time = time.perf_counter()
         evaluation = evaluator(
             parameters, conditions, fidelity=fidelity, channel_path=channel_path,
@@ -494,6 +503,7 @@ def _main() -> int:
                         help="re-simulate this many top checkpoint candidates with cache disabled")
     parser.add_argument("--metric-rtol", type=float, default=1e-6)
     parser.add_argument("--metric-atol", type=float, default=1e-9)
+    parser.add_argument("--rl-version", choices=("v1", "v2", "v3"), default="v1")
     args = parser.parse_args()
     selected_modes = sum((bool(args.summary_only), bool(args.preflight_only), args.verify_top is not None))
     if selected_modes > 1:
@@ -545,6 +555,7 @@ def _main() -> int:
         print(json.dumps({"verification": str(verification_path), **report}, indent=2, sort_keys=True))
         return 0 if report["passed"] else 3
     rows = run_receiver_search(
+        version=args.rl_version,
         count=args.count, seed=args.seed, output=args.output, channel_path=args.channel,
         channel_port_map=ChannelPortMap(*args.channel_ports),
         fidelity=EvaluationFidelity[args.fidelity.upper()],

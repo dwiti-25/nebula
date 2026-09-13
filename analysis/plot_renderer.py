@@ -45,8 +45,8 @@ def _figure(chart: Mapping[str, Any], request: PlotRequest) -> Figure:
     kind = chart.get("type")
     if kind == "line":
         for series in chart.get("series", []):
-            values = [float(value) for value in series.get("values", [])]
-            axis.plot(range(1, len(values) + 1), values, marker="o", markersize=2.5,
+            values = [float(value) if value is not None else float("nan") for value in series.get("values", [])]
+            axis.plot(series.get("x_values", range(1, len(values) + 1)), values, marker="o", markersize=2.5,
                       linewidth=1.5, label=series.get("name", "series"))
         if len(chart.get("series", [])) > 1:
             axis.legend(frameon=False)
@@ -65,7 +65,7 @@ def _figure(chart: Mapping[str, Any], request: PlotRequest) -> Figure:
     elif kind == "heatmap":
         rows = list(chart.get("rows", []))
         conditions = list(chart.get("conditions", []))
-        matrix = [[0.0 for _ in conditions] for _ in rows]
+        matrix = [[float("nan") for _ in conditions] for _ in rows]
         for cell in chart.get("cells", []):
             try:
                 row = rows.index(cell["process"])
@@ -76,7 +76,9 @@ def _figure(chart: Mapping[str, Any], request: PlotRequest) -> Figure:
                 except ValueError:
                     continue
             matrix[row][column] = 1.0 if cell.get("passed") else -1.0
-        axis.imshow(matrix, aspect="auto", vmin=-1, vmax=1, cmap="RdYlGn")
+        from matplotlib import colormaps
+        colors = colormaps["RdYlGn"].with_extremes(bad="#b8bec5")
+        axis.imshow(matrix, aspect="auto", vmin=-1, vmax=1, cmap=colors)
         axis.set_yticks(range(len(rows)), rows)
         axis.set_xticks(range(len(conditions)), chart.get("columns", []), rotation=45, ha="right", fontsize=7)
     else:
@@ -109,5 +111,6 @@ def render_chart(chart: Mapping[str, Any], *, format: str = "svg") -> bytes:
     rendered = output.getvalue()
     with _CACHE_LOCK:
         _CACHE[cache_key] = rendered
+        while len(_CACHE) > 128:
+            del _CACHE[next(iter(_CACHE))]
     return rendered
-

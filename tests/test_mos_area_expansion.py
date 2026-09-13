@@ -62,9 +62,10 @@ class GroupedMosSizingTests(unittest.TestCase):
     def test_ui_names_and_explains_all_three_ppo_versions(self):
         self.assertIn('value="v1"', INDEX_HTML)
         self.assertIn('value="v2"', INDEX_HTML)
-        self.assertIn('value="v3" disabled', INDEX_HTML)
-        self.assertIn("Expanded eight-parameter model", INDEX_HTML)
-        self.assertIn("matched MOS width, length and multiplier", INDEX_HTML)
+        self.assertIn('value="v3"', INDEX_HTML)
+        self.assertNotIn('value="v3" disabled', INDEX_HTML)
+        self.assertIn("Eight-head PPO", INDEX_HTML)
+        self.assertIn("matched MOS width, length and integer multiplier", INDEX_HTML)
 
 
 if __name__ == "__main__":

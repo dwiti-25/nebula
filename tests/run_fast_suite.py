@@ -13,6 +13,13 @@ from __future__ import annotations
 import unittest
 
 SPICE_FREE_MODULES = [
+    "tests.test_qualification_sequence",
+    "tests.test_v3_dashboard",
+    "tests.test_mos_area_expansion",
+    "tests.test_parser",
+    "tests.test_receiver_components",
+    "tests.test_runtime_integration",
+    "tests.test_v3_integration",
     "tests.test_autockt_rl",
     "tests.test_synthetic_benchmark",
     "tests.test_baseline_comparison",

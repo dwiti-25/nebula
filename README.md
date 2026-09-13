@@ -1,5 +1,9 @@
 # Nebula
 
+**PPO v3 and run graphs:** see [the current training and integration guide](docs/V3_TRAINING_AND_RUN_GRAPHS.md).
+The UI can train eight-parameter PPO checkpoints and display recorded run graphs
+and plots. v1/v2 remain separate; Manim is not required.
+
 Nebula is an automated analog-design framework for a PCIe Gen-2 receiver
 equalizer. This branch integrates the parameterized SKY130 CTLE with a robust,
 RL-independent Python-to-ngspice evaluation pipeline.

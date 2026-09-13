@@ -177,7 +177,7 @@ def select_final_designs(
 # (4) secondary trade-off preference among any PVT ties, via the ORIGINAL
 # design's own measured metrics (analysis.design_catalog.
 # rank_by_measured_trade_offs) -- never applied before priorities 1-3.
-TRADE_OFF_PREFERENCES = ("most_robust", "lowest_power", "strongest_eye_height", "widest_eye", "largest_margin", "balanced")
+TRADE_OFF_PREFERENCES = ("most_robust", "lowest_power", "strongest_eye_height", "widest_eye", "largest_margin", "balanced", "lowest_partial_mos_area", "lowest_noise")
 
 
 def select_with_trade_off_preference(

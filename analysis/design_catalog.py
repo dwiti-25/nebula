@@ -221,11 +221,17 @@ def rank_by_measured_trade_offs(designs: list[FeasibleDesign]) -> list[RankedDes
     best_height = best("dfe_locked_phase_eye_height_v", minimize=False)
     best_width = best("dfe_eye_width_ui", minimize=False)
     best_margin = best("dfe_min_margin_v", minimize=False)
+    best_area = best("partial_mos_channel_area_um2", minimize=True)
+    best_noise = best("input_referred_noise_vrms", minimize=True)
 
     ranked = []
     for design in designs:
         labels = []
         m = design.metrics
+        if best_area is not None and m.get("partial_mos_channel_area_um2") == best_area:
+            labels.append("lowest_partial_mos_area")
+        if best_noise is not None and m.get("input_referred_noise_vrms") == best_noise:
+            labels.append("lowest_noise")
         if best_power is not None and "ctle_power_w" in m and m["ctle_power_w"] == best_power:
             labels.append("lowest_power")
         if (best_height is not None and "dfe_locked_phase_eye_height_v" in m

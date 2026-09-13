@@ -59,7 +59,7 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 from simulator.channel import ChannelPortMap, load_s4p, validate_s4p_channel
-from simulator.config import ProcessCorner, SimulationConditions
+from simulator.config import PVT_GRID, QUALIFICATION_PVT_GRID, ProcessCorner, SimulationConditions
 from simulator.receiver import EvaluationFidelity, ReceiverParameters, evaluate_receiver
 from simulator.rl_adapter import ReceiverRLAdapter, RLBudget
 
@@ -123,6 +123,7 @@ PVT_CONDITION_SETS: dict[str, Optional[tuple[SimulationConditions, ...]]] = {
         SimulationConditions(ProcessCorner.FF, 125.0, 1.71),  # sec 22's worst-case corner, now 27/27-confirmed
     ),
     "minimal27": pvt_sweep.MINIMAL_27_CONDITIONS,
+    "full36": QUALIFICATION_PVT_GRID,
 }
 
 # Runtime diagnosis (docs/autockt-mapping.md sec 24 / RUNTIME investigation):
@@ -151,7 +152,7 @@ PVT_CONDITION_SETS: dict[str, Optional[tuple[SimulationConditions, ...]]] = {
 # halves the HD3 stage's contribution (~70-86s -> ~23-29s per condition,
 # confirmed by direct measurement of both fidelities on the same candidate).
 #
-# "minimal27" (the actual robustness proof) deliberately keeps FINAL --
+# "minimal27" (partial coverage) and "full36" deliberately keep FINAL --
 # only "smoke" (explicitly a cheap pre-check, never itself a robustness
 # claim) is downgraded. Explicit per-named-set mapping, not a change to
 # select_final_design's own default (still FINAL for any caller that
@@ -159,6 +160,7 @@ PVT_CONDITION_SETS: dict[str, Optional[tuple[SimulationConditions, ...]]] = {
 PVT_CONDITION_SET_FIDELITY: dict[str, EvaluationFidelity] = {
     "smoke": EvaluationFidelity.CANDIDATE,
     "minimal27": EvaluationFidelity.FINAL,
+    "full36": EvaluationFidelity.FINAL,
 }
 
 
@@ -219,6 +221,10 @@ def _load_checkpoint_state(checkpoint_path: Path) -> dict[str, Any]:
     return _load_checkpoint_payload(checkpoint_path)[0]
 
 
+from simulator.runtime import bounded_search
+
+
+@bounded_search
 def generate_candidates(
     *,
     target: TargetSpec,
@@ -249,43 +255,62 @@ def generate_candidates(
     evaluate_receiver, once per environment step.
     """
 
-    grids = build_parameter_grids(grid_points, spacing=grid_spacing)
+    grids = build_parameter_grids(grid_points, spacing=grid_spacing, version=rl_version)
+    loaded_checkpoint = _load_checkpoint_payload(checkpoint_path) if checkpoint_path is not None else None
+    if rl_version == "v3" and loaded_checkpoint:
+        from rl.runtime_contract import grids_from_contract
+        if not loaded_checkpoint[1]:
+            raise ValueError("v3 requires a v3 metadata-bearing policy export")
+        grids = grids_from_contract(loaded_checkpoint[1])
     initial_indices = _resolve_initial_indices(grids, initial_indices_source)
 
-    if rl_version not in {"v1", "v2"}:
-        raise ValueError("rl_version must be 'v1' or 'v2'")
+    if rl_version not in {"v1", "v2", "v3"}:
+        raise ValueError("rl_version must be v1, v2 or v3")
     adapter_kwargs: dict[str, Any] = {}
     channel_kwargs = _channel_evaluator_kwargs(channel_path, channel_port_map)
     if channel_kwargs:
         adapter_kwargs["evaluator_kwargs"] = channel_kwargs
     if backend == "synthetic":
-        adapter_kwargs["evaluator"] = synthetic_evaluate_receiver
+        from rl.synthetic_v3 import synthetic_evaluate_receiver_v3
+        adapter_kwargs["evaluator"] = synthetic_evaluate_receiver_v3 if rl_version == "v3" else synthetic_evaluate_receiver
     if use_evaluation_cache:
         adapter_kwargs["evaluator"] = make_cached_evaluator(
             adapter_kwargs.get("evaluator", evaluate_receiver)
         )
-    adapter = ReceiverRLAdapter(budget=RLBudget(max_evaluations), seed=eval_seed, **adapter_kwargs)
+    adapter = ReceiverRLAdapter(budget=RLBudget(max_evaluations), seed=eval_seed, version=rl_version, **adapter_kwargs)
 
-    v2 = rl_version == "v2"
+    from rl.runtime_contract import STATE_DIMS, runtime_contract, validate_inference_contract
+    expected_contract = runtime_contract(rl_version, grids, channel_path, channel_port_map, backend)
+    from analysis.run_graph import ACTIVE
+    graph = ACTIVE.get()
+    if graph:
+        from simulator.provenance import sha256_file
+        graph.model_node = graph.node("model", "Policy, grid and channel contract", "loaded" if checkpoint_path else "untrained", {
+            "runtime_contract": expected_contract, "checkpoint_metadata": loaded_checkpoint[1] if loaded_checkpoint else None,
+            "checkpoint_sha256": sha256_file(checkpoint_path) if checkpoint_path and checkpoint_path.is_file() else None}, graph.root)
+    v2 = rl_version != "v1"
     env = AutoCktReceiverEnv(
         target_pool=(target,), initial_indices=initial_indices, horizon=horizon,
         adapter=adapter, grids=grids, seed=eval_seed, randomize_initial_state=randomize_initial_state,
         evaluate_on_reset=v2, state_schema=rl_version,
         use_reward_v2=v2, max_total_evaluations=max_evaluations,
     )
-    agent = PPOAgent(state_dim=STATE_DIM_V2 if v2 else STATE_DIM,
-                     num_heads=len(PARAMETER_NAMES), seed=agent_seed)
+    agent = PPOAgent(state_dim=STATE_DIMS[rl_version],
+                     num_heads=len(grids), seed=agent_seed)
     if checkpoint_path is not None:
-        policy_state, metadata = _load_checkpoint_payload(checkpoint_path)
+        policy_state, metadata = loaded_checkpoint
         if metadata and metadata.get("state_schema") != rl_version:
             raise ValueError(
                 f"checkpoint uses state schema {metadata.get('state_schema')!r}, "
                 f"but --rl-version={rl_version!r} was requested"
             )
+        validate_inference_contract(metadata, expected_contract)
         agent.policy.load_state_dict(policy_state)
 
     candidates: list[PipelineCandidate] = []
     for episode in range(episodes):
+        if env.budget_exhausted():
+            break
         state, _ = env.reset()
         done = truncated = False
         episode_reward = 0.0
@@ -376,10 +401,13 @@ def select_final_design(
 
     if pvt_conditions is None:
         ranked = rank_by_measured_trade_offs(designs)
-        best = ranked[0].design
+        preferred = next((entry for entry in ranked if trade_off_preference in entry.trade_off_labels), ranked[0])
+        best = preferred.design
         return {
             "selected": {"design_id": best.design_id, "parameters": best.parameters, "metrics": best.metrics},
-            "trade_off_labels": list(ranked[0].trade_off_labels),
+            "trade_off_labels": list(preferred.trade_off_labels),
+            "alternatives": [{"design_id": item.design.design_id, "parameters": item.design.parameters,
+                              "metrics": item.design.metrics, "labels": list(item.trade_off_labels)} for item in ranked],
             "pvt": None,
             "selection_basis": "nominal-only (no PVT conditions supplied)",
         }
@@ -415,6 +443,7 @@ def select_final_design(
             "metrics": matching_design.metrics,
         },
         "pvt": {
+            "points": [asdict(p) for p in top.points],
             "n_conditions": top.n_conditions, "n_passing": top.n_passing, "pass_rate": top.pass_rate,
             "met_minimum_pass_rate": top.pass_rate >= minimum_pass_rate,
             "worst_case_conditions": [
@@ -436,10 +465,8 @@ def _pvt_result_from_selection(selection: dict[str, Any]) -> Optional[PVTRobustn
     JSON-serializable `selection["pvt"]` summary, so run_pipeline can feed
     the SAME result into build_final_specification_report instead of
     dropping it (or, worse, re-running PVT a second time to get an object
-    back). Only `worst_case_conditions`/summary fields are reconstructed --
-    `points` (the full per-condition list) is not part of the summary dict
-    and is not needed by build_final_specification_report/format_report,
-    which only read the summary fields.
+    back). New summaries retain individual points so reports can verify
+    coverage. Legacy summaries without points remain coverage-unproven.
     """
 
     pvt = selection.get("pvt")
@@ -455,7 +482,8 @@ def _pvt_result_from_selection(selection: dict[str, Any]) -> Optional[PVTRobustn
             )
             for w in pvt["worst_case_conditions"]
         ),
-        points=(),
+        points=tuple(PVTPointResult(**{k: v for k, v in p.items() if k != "target_assessment"})
+                     for p in pvt.get("points", ())),
     )
 
 
@@ -481,6 +509,7 @@ def measure_hd3_and_noise(
     parameters: dict[str, float], *, conditions: SimulationConditions = SimulationConditions(),
     channel_path: str | Path = SYNTHETIC_CHANNEL_PATH,
     channel_port_map: ChannelPortMap = ChannelPortMap(),
+    eye_capture: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Runs the existing, unmodified evaluate_receiver at FINAL fidelity for
     one design at nominal conditions -- the only fidelity level at which
@@ -491,11 +520,46 @@ def measure_hd3_and_noise(
     reporting NOT CLAIMED for HD3/noise rather than inventing a number.
     """
 
+    evaluator_kwargs = _channel_evaluator_kwargs(channel_path, channel_port_map)
+    # Keep the established evaluator call shape unless waveform capture was
+    # explicitly requested. This also preserves compatibility with external
+    # evaluator adapters that implement the pre-eye-diagram interface.
+    if eye_capture is not None:
+        evaluator_kwargs["eye_capture"] = eye_capture
     evaluation = evaluate_receiver(
         ReceiverParameters(**parameters), conditions, EvaluationFidelity.FINAL,
-        **_channel_evaluator_kwargs(channel_path, channel_port_map),
+        **evaluator_kwargs,
     )
+    observe(evaluation, phase="final_hd3_noise")
     return {"success": evaluation.success, "metrics": dict(evaluation.metrics), "failed_stage": evaluation.failed_stage}
+
+
+def generate_eye_artifacts(
+    parameters: dict[str, float], output: str | Path, *,
+    conditions: SimulationConditions = SimulationConditions(),
+    channel_path: str | Path = SYNTHETIC_CHANNEL_PATH,
+    channel_port_map: ChannelPortMap = ChannelPortMap(),
+    capture: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Capture and render one selected design; never called during training."""
+
+    eye_capture: dict[str, Any] = capture if capture is not None else {}
+    evaluation = None
+    if not eye_capture:
+        evaluation = evaluate_receiver(
+            ReceiverParameters(**parameters), conditions, EvaluationFidelity.TRAINING,
+            eye_capture=eye_capture,
+            **_channel_evaluator_kwargs(channel_path, channel_port_map),
+        )
+        observe(evaluation, phase="final_eye_diagram")
+    if not eye_capture:
+        return {
+            "status": "not_produced", "reason": "selected design did not reach transient eye capture",
+            "failed_stage": evaluation.failed_stage if evaluation else None,
+        }
+    from analysis.eye_diagram import render_eye_diagram
+    return {**render_eye_diagram(eye_capture, output),
+            "evaluation_reused_from_final_refinement": evaluation is None}
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +601,7 @@ def _pvt_progress_evaluator(feasible_candidates: list[PipelineCandidate], real_e
                 parameters, conditions=(condition,), fidelity=fidelity,
                 **evaluator_kwargs,
             )
+            observe(evaluation, phase="pvt")
             results.append(evaluation)
             print(json.dumps({
                 "nebula_progress_event": "pvt_condition_complete",
@@ -556,6 +621,10 @@ def _pvt_progress_evaluator(feasible_candidates: list[PipelineCandidate], real_e
 # Full pipeline
 # ---------------------------------------------------------------------------
 
+from analysis.run_graph import record_pipeline, observe
+
+
+@record_pipeline
 def run_pipeline(
     *,
     target: TargetSpec,
@@ -572,8 +641,11 @@ def run_pipeline(
     trade_off_preference: str = "most_robust",
     measure_hd3_noise_flag: bool = False,
     export_schematic_to: Optional[Path] = None,
+    eye_diagram_output: Optional[Path] = None,
     rl_version: str = "v1",
     use_evaluation_cache: bool = False,
+    search_seconds: float | None = None,
+    max_evaluations: int = 1000,
     channel_path: str | Path = SYNTHETIC_CHANNEL_PATH,
     channel_port_map: ChannelPortMap = ChannelPortMap(),
 ) -> dict[str, Any]:
@@ -589,9 +661,22 @@ def run_pipeline(
         episodes=episodes, horizon=horizon, backend=backend, randomize_initial_state=randomize_initial_state,
         initial_indices_source=initial_indices_source,
         rl_version=rl_version, use_evaluation_cache=use_evaluation_cache,
+        search_seconds=search_seconds, max_evaluations=max_evaluations,
         channel_path=channel_path, channel_port_map=channel_port_map,
     )
     feasible = filter_nominal_feasible(candidates, target)
+    if rl_version == "v3":
+        from analysis.target_assessment import final_violations
+        feasible = [candidate for candidate in feasible if not any(
+            name in ("peaking_db", "dfe_error_count")
+            for name in final_violations(candidate.metrics, target))]
+    from analysis.run_graph import ACTIVE
+    graph = ACTIVE.get()
+    if graph:
+        graph.filter_node = graph.node("filter", "Strict nominal feasibility", "passed" if feasible else "no_feasible_design",
+            {"accepted_episodes": [c.episode for c in feasible], "candidates": [asdict(c) for c in candidates]}, graph.root)
+        for origin in set(graph.origins.values()):
+            graph.data["edges"].append({"source": origin, "target": graph.filter_node, "relation": "assessed_by"})
     print(json.dumps({
         "nebula_progress_event": "candidate_generation_complete",
         "n_feasible": len(feasible),
@@ -622,7 +707,7 @@ def run_pipeline(
         "backend": backend,
         "rl_version": rl_version,
         "state_schema": rl_version,
-        "reward_schema": "reward_v2" if rl_version == "v2" else "autockt_reward_v1",
+        "reward_schema": f"reward_{rl_version}" if rl_version != "v1" else "autockt_reward_v1",
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
         "channel": {
             "path": str(channel.path), "checksum": channel.checksum,
@@ -643,25 +728,48 @@ def run_pipeline(
         ],
     }
 
+    eye_capture: dict[str, Any] = {}
     if selection["selected"] is not None and measure_hd3_noise_flag and backend == "real":
         refinement = measure_hd3_and_noise(
             selection["selected"]["parameters"], channel_path=channel_path,
             channel_port_map=channel_port_map,
+            eye_capture=eye_capture if eye_diagram_output is not None else None,
         )
         result["hd3_noise_refinement"] = {
             "attempted": True, "success": refinement["success"], "failed_stage": refinement["failed_stage"],
         }
-        if refinement["success"]:
+        from analysis.target_assessment import final_violations
+        violations = final_violations(refinement["metrics"], target)
+        if refinement["success"] and not violations:
             # Merge -- keep the original TRAINING-fidelity metrics and add/
             # override with the richer FINAL-fidelity set (which includes
             # hd3_db/input_referred_noise_vrms, absent before this point).
             selection["selected"]["metrics"] = {**selection["selected"]["metrics"], **refinement["metrics"]}
+        else:
+            result["hd3_noise_refinement"]["success"] = False
+            result["hd3_noise_refinement"]["violations"] = violations
+            selection["selected"] = None
+            selection["reason"] = "Selected candidate failed final validation"
+            eye_capture.clear()
     elif measure_hd3_noise_flag and backend != "real":
         result["hd3_noise_refinement"] = {
             "attempted": False, "success": None, "failed_stage": None,
             "note": "measure_hd3_noise_flag has no effect for backend='synthetic' -- "
                     "HD3/noise are real-ngspice-only measurements.",
         }
+
+    if eye_diagram_output is not None:
+        if selection["selected"] is not None and backend == "real":
+            result["eye_diagram"] = generate_eye_artifacts(
+                selection["selected"]["parameters"], eye_diagram_output,
+                channel_path=channel_path, channel_port_map=channel_port_map,
+                capture=eye_capture,
+            )
+        else:
+            result["eye_diagram"] = {
+                "status": "not_produced",
+                "reason": "a selected real-SPICE design is required; synthetic data is not an eye-diagram claim",
+            }
 
     if selection["selected"] is not None and export_schematic_to is not None:
         parameters = ReceiverParameters(**selection["selected"]["parameters"])
@@ -703,7 +811,7 @@ def _main() -> int:
              "--target-mode uses; no new target semantics.",
     )
     parser.add_argument("--checkpoint", type=Path, default=None)
-    parser.add_argument("--rl-version", choices=("v1", "v2"), default="v1",
+    parser.add_argument("--rl-version", choices=("v1", "v2", "v3"), default="v1",
                         help="Versioned PPO configuration; v1 remains the historical baseline.")
     parser.add_argument("--evaluation-cache", action="store_true",
                         help="Cache exact repeated evaluator calls (recommended for PPO v2).")
@@ -718,9 +826,12 @@ def _main() -> int:
     parser.add_argument("--backend", choices=("real", "synthetic"), default="synthetic")
     parser.add_argument("--episodes", type=int, default=3)
     parser.add_argument("--horizon", type=int, default=4)
+    parser.add_argument("--search-seconds", type=float, default=None)
+    parser.add_argument("--max-evaluations", type=int, default=1000)
     parser.add_argument("--agent-seed", type=int, default=42)
     parser.add_argument("--eval-seed", type=int, default=42)
     parser.add_argument("--randomize-initial-state", action="store_true", default=True)
+    parser.add_argument("--no-randomize-initial-state", action="store_false", dest="randomize_initial_state")
     parser.add_argument("--initial-indices-source", choices=("verified", "grid-center"), default="verified")
     parser.add_argument("--pvt-condition-set", choices=tuple(PVT_CONDITION_SETS), default="none",
                          help="'none' (default, unchanged behavior): NOMINAL-ONLY selection -- the selected design "
@@ -730,13 +841,11 @@ def _main() -> int:
                               "runs the identical stage set and is sufficient for pass/fail feasibility and "
                               "trade-off selection, see PVT_CONDITION_SET_FIDELITY's comment) -- exercises the "
                               "PVT-aware selection pathway with real SPICE, still NOT a robustness proof. "
-                              "'minimal27': the full 27-point TT/SS/FF x VDD+/-5% x "
-                              "0-125C robustness sweep (experiments/pvt_sweep.py's own MINIMAL_27_CONDITIONS) -- "
-                              "the only choice that constitutes an actual PVT robustness result; SLOW "
-                              "(~121.8 min historically for one design, docs/autockt-mapping.md sec 22) and never "
-                              "selected automatically.")
+                              "'minimal27': a 27-condition TT/SS/FF subset, not full coverage. "
+                              "'full36': the agreed TT/SS/FF, three-voltage, four-temperature grid. "
+                              "Both use FINAL fidelity, are expensive, and are never selected automatically.")
     parser.add_argument("--trade-off-preference", choices=("most_robust", "lowest_power", "strongest_eye_height",
-                                                             "widest_eye", "largest_margin", "balanced"),
+                                                             "widest_eye", "largest_margin", "balanced", "lowest_partial_mos_area", "lowest_noise"),
                          default="most_robust")
     parser.add_argument(
         "--measure-hd3-noise", action="store_true", default=False,
@@ -748,6 +857,8 @@ def _main() -> int:
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--export-schematic", type=Path, default=None)
+    parser.add_argument("--eye-diagram-output", type=Path, default=None,
+                        help="Render SVG/PNG plus source JSON for the selected real-SPICE design only")
     args = parser.parse_args()
 
     if args.output.exists():
@@ -764,6 +875,8 @@ def _main() -> int:
 
     result = run_pipeline(
         target=target, checkpoint_path=args.checkpoint, agent_seed=args.agent_seed, eval_seed=args.eval_seed,
+        search_seconds=args.search_seconds, max_evaluations=args.max_evaluations,
+        graph_output=args.output.with_suffix(".graph.json"),
         episodes=args.episodes, horizon=args.horizon, backend=args.backend,
         randomize_initial_state=args.randomize_initial_state,
         initial_indices_source=args.initial_indices_source,
@@ -772,6 +885,7 @@ def _main() -> int:
         trade_off_preference=args.trade_off_preference,
         measure_hd3_noise_flag=args.measure_hd3_noise,
         export_schematic_to=args.export_schematic,
+        eye_diagram_output=args.eye_diagram_output,
         rl_version=args.rl_version, use_evaluation_cache=args.evaluation_cache,
         channel_path=args.channel, channel_port_map=ChannelPortMap(*args.channel_ports),
     )

@@ -80,6 +80,8 @@ def collect_rollout(
             # can never make real progress once no evaluations remain.
             break
         state, reset_info = env.reset()
+        if env.budget_exhausted():
+            break  # A reset can consume the final evaluation; do not fabricate a transition.
         episode_log = EpisodeLog(episode_index=episode_index, target=reset_info["target"])
         done = False
         truncated = False
@@ -87,15 +89,21 @@ def collect_rollout(
             choices, log_prob, value = agent.act(state)
             indices_before = env.indices
             parameters_before = {
-                name: env.grids[name].value_at(index) for name, index in zip(PARAMETER_NAMES, indices_before)
+                name: env.grids[name].value_at(index) for name, index in zip(env.parameter_names, indices_before)
             }
             step_out = env.step(choices)
+            if step_out.info.get("parameters") is None:
+                # Deadline between policy sampling and evaluation: discard the
+                # unfinished episode, never train on a fabricated budget step.
+                if episode_log.steps:
+                    del transitions[-len(episode_log.steps):]
+                return transitions, 0.0, episode_logs
             if on_event is not None:
                 # [NEBULA ADAPTATION -- Required change 6] purely additive:
                 # existing on_step/on_update logging (below, and in
                 # train()) is completely unaffected either way.
                 reward_result = step_out.info.get("reward_result")
-                on_event(build_step_event(
+                on_event({**build_step_event(
                     run_id=run_id, step=step_out.info["step_count"], episode=episode_index,
                     update=update_index, target_id=str(reset_info["target"]), target_values=reset_info["target"],
                     state_before=state, state_after=step_out.state,
@@ -111,7 +119,9 @@ def collect_rollout(
                     log_prob=log_prob, value_estimate=value,
                     done=step_out.done, truncated=step_out.truncated,
                     evaluation_count=step_out.info["total_evaluation_count"],
-                ))
+                ), "cache_hit": step_out.info.get("cache_hit"),
+                    "evaluation_timing_s": step_out.info.get("runtime_s"),
+                    "evaluation_id": step_out.info.get("evaluation_id")})
             bootstrap_value = 0.0
             if step_out.truncated and not step_out.done:
                 # [NEBULA ADAPTATION -- repair #2] Horizon cutoff, not a
@@ -180,12 +190,29 @@ def train(
     on_update: Callable[[dict[str, object]], None] | None = None,
     on_event: Callable[[dict[str, object]], None] | None = None,
     run_id: str = "",
+    start_update: int = 0,
+    start_episode: int = 0,
+    workers: int = 1,
+    search_seconds: float | None = None,
 ) -> TrainResult:
-    result = TrainResult()
-    episode_index = 0
-    for update_index in range(num_updates):
+    if workers not in (1, 2):
+        raise ValueError("workers must be one or two")
+    if search_seconds is not None:
+        from simulator.runtime import time_budget
+        with time_budget(search_seconds):
+            return train(env, agent, num_updates=num_updates, episodes_per_update=episodes_per_update,
+                ppo_epochs=ppo_epochs, minibatch_size=minibatch_size, on_step=on_step,
+                on_update=on_update, on_event=on_event, run_id=run_id,
+                start_update=start_update, start_episode=start_episode, workers=workers)
+    from .parallel_rollout import collect_parallel
+    collector = collect_rollout if workers == 1 else collect_parallel
+    result = TrainResult(total_evaluations=env.adapter.total_evaluations)
+    episode_index = start_episode
+    for update_index in range(start_update, start_update + num_updates):
+        if env.budget_exhausted():
+            break
         t0 = time.perf_counter()
-        transitions, bootstrap_value, episode_logs = collect_rollout(
+        transitions, bootstrap_value, episode_logs = collector(
             env,
             agent,
             episodes=episodes_per_update,
@@ -196,6 +223,9 @@ def train(
             update_index=update_index,
         )
         episode_index += len(episode_logs)
+        result.total_evaluations = env.adapter.total_evaluations
+        if not transitions:
+            break
         stats = agent.update(transitions, bootstrap_value, epochs=ppo_epochs, minibatch_size=minibatch_size)
         wall_clock_s = time.perf_counter() - t0
 

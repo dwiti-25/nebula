@@ -321,9 +321,9 @@ class PvtResultFlowsIntoFinalSpecificationTests(unittest.TestCase):
 
         self.assertIsNotNone(result["selection"]["selected"])
         pvt_row = next(r for r in result["final_specification"]["rows"] if r["metric"] == "PVT (pass/total)")
-        # must reflect the real 2-condition sweep, not "NOT CLAIMED".
+        # A two-condition sweep cannot establish full PVT coverage.
         self.assertEqual(pvt_row["measured"], "2/2")
-        self.assertEqual(pvt_row["verdict"], "PASS")
+        self.assertEqual(pvt_row["verdict"], "NOT CLAIMED")
 
 
 class MeasureHd3AndNoiseTests(unittest.TestCase):
@@ -370,6 +370,20 @@ class MeasureHd3AndNoiseTests(unittest.TestCase):
 
 
 class RunPipelineHd3NoiseRefinementTests(unittest.TestCase):
+    def test_incomplete_finalist_clears_selection(self):
+        from simulator.receiver import ReceiverEvaluation
+        def incomplete(parameters, conditions, fidelity):
+            return ReceiverEvaluation(True, parameters, conditions, fidelity, (),
+                {"hd3_db": -40.0, "input_referred_noise_vrms": 0.0005}, None, 1.0, "id", {})
+        with patch("experiments.run_autockt_pipeline.generate_candidates", return_value=self._feasible_candidates()), \
+             patch("experiments.run_autockt_pipeline.evaluate_receiver", side_effect=incomplete):
+            result = run_pipeline(target=TargetSpec.from_existing_thresholds(), checkpoint_path=None,
+                                  backend="real", measure_hd3_noise_flag=True)
+        self.assertIsNone(result["selection"]["selected"])
+        self.assertFalse(result["hd3_noise_refinement"]["success"])
+        self.assertNotIn("schematic_path", result)
+        self.assertNotIn("final_specification", result)
+
     def _feasible_candidates(self):
         return [PipelineCandidate(
             0, {"rload_ohm": 1000.0, "rdeg_ohm": 1000.0, "cdeg_f": 5e-13, "itail_a": 1e-4, "dfe_tap_v": 0.0},
@@ -382,7 +396,9 @@ class RunPipelineHd3NoiseRefinementTests(unittest.TestCase):
 
         def fake_evaluate_receiver(parameters, conditions, fidelity):
             return ReceiverEvaluation(True, parameters, conditions, fidelity, (),
-                                       {"hd3_db": -40.0, "input_referred_noise_vrms": 0.0005},
+                                       {**self._feasible_candidates()[0].metrics,
+                                        "hd3_db": -40.0, "input_referred_noise_vrms": 0.0005,
+                                        "peaking_db": 6.0, "dfe_error_count": 0},
                                        None, 90.0, "id", {})
 
         with patch("experiments.run_autockt_pipeline.generate_candidates", return_value=self._feasible_candidates()):

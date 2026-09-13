@@ -1,8 +1,9 @@
 # PPO v3 integration and per-run execution graph plan
 
-Status: implementation contract to apply **after** the incoming AI changes are
-merged and audited. This document deliberately does not start checkpoint
-training or reinterpret an existing v1/v2 checkpoint.
+Status: implemented core PPO v3 and run-graph integration on 2026-09-11.
+See [the current implementation/training guide](V3_TRAINING_AND_RUN_GRAPHS.md)
+for supported paths, validation and explicit remaining scope. This document
+preserves the original design discussion; long-run training remains separate.
 
 ## 1. Objective and non-negotiable rules
 
@@ -269,4 +270,3 @@ PPO v3 is ready for training only when all of the following are true:
   represented truthfully;
 - the full test suite passes on a clean commit;
 - the teammate receives a frozen, reproducible training contract.
-

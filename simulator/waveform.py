@@ -110,6 +110,8 @@ def ac_metrics(trace: Trace) -> dict[str, object]:
         "peak_gain_db": float(gain_db[peak_index]),
         "peak_frequency_hz": float(frequency[peak_index]),
         "peaking_db": float(gain_db[peak_index] - metrics["gain_100mhz_db"]),
+        "boost_2p5ghz_db": float(metrics["gain_2p5ghz_db"] - metrics["gain_100mhz_db"]),
+        "global_peak_boost_db": float(gain_db[global_index] - metrics["gain_100mhz_db"]),
         "global_peak_gain_db": float(gain_db[global_index]),
         "global_peak_frequency_hz": float(frequency[global_index]),
         "out_of_band_excess_peak_db": float(gain_db[global_index] - gain_db[peak_index]),

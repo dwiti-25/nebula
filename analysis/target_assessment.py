@@ -9,6 +9,8 @@ PVT qualification, and the UI use this module instead.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+from numbers import Real
 from typing import Mapping
 
 from rl.target_spec import SPEC_DIRECTIONS, SPEC_NAMES, TargetSpec
@@ -60,6 +62,24 @@ def _normalization_scale(name: str, target: float) -> float:
     return max(abs(target), 1e-12)
 
 
+def final_violations(metrics, target):
+    """Final measurements must independently satisfy the target and RF limits."""
+    assessment = assess_target(metrics, target, simulator_success=True)
+    failures = [m.name for m in assessment.metrics if not m.passed]
+    checks = {
+        "hd3_db": lambda x: x < -30.0,
+        "input_referred_noise_vrms": lambda x: 0 < x < 0.0015,
+        "peaking_db": lambda x: 3 <= x <= 12,
+        "dfe_error_count": lambda x: x == 0,
+    }
+    for name, predicate in checks.items():
+        value = metrics.get(name)
+        if (not isinstance(value, Real) or isinstance(value, bool)
+                or not math.isfinite(value) or not predicate(value)):
+            failures.append(name)
+    return failures
+
+
 def assess_target(
     current_metrics: Mapping[str, float],
     target: TargetSpec,
@@ -79,7 +99,7 @@ def assess_target(
         raw = current_metrics.get(name)
         target_value = float(getattr(target, name))
         direction = SPEC_DIRECTIONS[name]
-        if raw is None:
+        if not isinstance(raw, Real) or isinstance(raw, bool) or not math.isfinite(raw):
             missing.append(name)
             assessed.append(MetricAssessment(name, None, target_value, direction, None, None, False))
             continue

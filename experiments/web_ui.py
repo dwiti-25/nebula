@@ -44,7 +44,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 # When this file is launched directly (``python experiments/web_ui.py``),
 # Python places ``experiments/`` rather than the repository root on
@@ -53,7 +53,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from analysis.performance_dashboard import build_dashboard
+from analysis.v3_dashboard import build_dashboard
 from analysis.artifact_store import packaged_file_exists
 from analysis.plot_renderer import render_chart
 from analysis.run_evidence import build_run_dashboard
@@ -80,7 +80,7 @@ _RUNS_LOCK = threading.Lock()
 
 TARGET_MODES = ("trivial", "hard", "custom")
 BACKENDS = ("synthetic", "real")
-RL_VERSIONS = ("v1", "v2")
+RL_VERSIONS = ("v1", "v2", "v3")
 CHANNELS = {
     "synthetic": ("channels/synthetic_regression.s4p", (1, 2, 3, 4)),
     "ieee802_reference": ("channels/ieee802_ibm_20db_thru.s4p", (1, 3, 2, 4)),
@@ -91,9 +91,9 @@ CHANNELS = {
 # the pipeline's own PVT_CONDITION_SETS keys by
 # tests/test_web_ui.py::PvtOptionsMatchPipelineTests so the two cannot
 # silently drift apart.
-PVT_CONDITION_SETS = ("none", "smoke", "minimal27")
+PVT_CONDITION_SETS = ("none", "smoke", "minimal27", "full36")
 TRADE_OFF_PREFERENCES = (
-    "most_robust", "lowest_power", "strongest_eye_height", "widest_eye", "largest_margin", "balanced",
+    "most_robust", "lowest_power", "strongest_eye_height", "widest_eye", "largest_margin", "balanced", "lowest_partial_mos_area", "lowest_noise",
 )
 TARGET_SPEC_FIELDS = (
     "dfe_locked_phase_eye_height_v", "dfe_eye_width_ui", "dfe_min_margin_v", "ctle_power_w",
@@ -109,6 +109,25 @@ _RUN_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 def _validate_request(payload: dict[str, Any]) -> list[str]:
     problems: list[str] = []
+    import math
+    for name in ("search_seconds", "max_evaluations"):
+        value = payload.get(name)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value <= 0
+                or (name == "max_evaluations" and int(value) != value)):
+            problems.append(f"{name} must be a finite positive {'integer' if name == 'max_evaluations' else 'number'}")
+    if payload.get("workers", 1) not in (1, 2):
+        problems.append("workers must be 1 or 2")
+    if payload.get("workflow", "infer") not in ("infer", "train"):
+        problems.append("workflow must be infer or train")
+    if payload.get("workflow") == "train":
+        if payload.get("target_mode") == "custom":
+            problems.append("UI training currently uses trivial/hard targets; use CLI target pools for generalization")
+        try:
+            if not 1 <= int(payload.get("updates", 0)) <= 100:
+                problems.append("training updates must be 1–100")
+        except (TypeError, ValueError):
+            problems.append("training updates must be an integer")
     if payload.get("target_mode") not in TARGET_MODES:
         problems.append(f"target_mode must be one of {TARGET_MODES}")
     if payload.get("target_mode") == "custom":
@@ -135,7 +154,7 @@ def _validate_request(payload: dict[str, Any]) -> list[str]:
             problems.append("horizon must be >= 1")
     except (TypeError, ValueError):
         problems.append("horizon must be an integer")
-    if payload.get("backend") == "real" and not payload.get("checkpoint"):
+    if payload.get("backend") == "real" and not payload.get("checkpoint") and payload.get("workflow") != "train":
         problems.append("backend='real' requires a checkpoint (an untrained policy against real SPICE "
                          "has no learned behavior to demonstrate -- see docs/autockt-mapping.md sec 20)")
     checkpoint = payload.get("checkpoint")
@@ -155,6 +174,27 @@ def _validate_request(payload: dict[str, Any]) -> list[str]:
 
 def _build_argv(payload: dict[str, Any], *, output_path: Path, schematic_path: Path) -> list[str]:
     channel_path, channel_ports = CHANNELS[payload.get("channel_id", "synthetic")]
+    runtime_args = []
+    if payload.get("search_seconds") is not None:
+        runtime_args += ["--search-seconds", str(payload["search_seconds"])]
+    if payload.get("workflow") == "train":
+        version = payload.get("rl_version", "v3")
+        argv = [sys.executable, "-m", "experiments.train_autockt", "--backend", payload["backend"],
+            "--rl-version", version, "--target-mode", payload["target_mode"],
+            "--updates", str(int(payload["updates"])), "--episodes-per-update", str(int(payload["episodes"])),
+            "--horizon", str(int(payload["horizon"])), "--max-evaluations", str(int(payload["updates"]) * int(payload["episodes"]) * (int(payload["horizon"]) + 1)),
+            "--initial-indices-source", payload.get("initial_indices_source", "verified"),
+            "--channel", channel_path, "--channel-ports", *(str(p) for p in channel_ports),
+            "--output", str(output_path.with_suffix(".training.jsonl")),
+            "--events-output", str(output_path.with_suffix(".events.jsonl")),
+            "--graph-output", str(output_path.with_suffix(".graph.json")), "--summary-output", str(output_path),
+            "--save-final-policy", str(output_path.with_name(f"{output_path.stem}_{version}_policy.pt")),
+            "--save-full-checkpoint", str(output_path.with_name(f"{output_path.stem}_{version}_full.pt"))]
+        if payload.get("evaluation_cache"):
+            argv.append("--evaluation-cache")
+        if payload.get("max_evaluations") is not None:
+            argv[argv.index("--max-evaluations") + 1] = str(payload["max_evaluations"])
+        return argv + runtime_args + ["--workers", str(payload.get("workers", 1))]
     argv = [
         sys.executable, "-m", "experiments.run_autockt_pipeline",
         "--backend", payload["backend"],
@@ -168,6 +208,7 @@ def _build_argv(payload: dict[str, Any], *, output_path: Path, schematic_path: P
         "--channel-ports", *(str(port) for port in channel_ports),
         "--output", str(output_path),
         "--export-schematic", str(schematic_path),
+        "--eye-diagram-output", str(output_path.with_name(f"{output_path.stem}_eye.svg")),
     ]
     if payload["target_mode"] == "custom":
         argv += ["--target-json", json.dumps({f: float(payload["target"][f]) for f in TARGET_SPEC_FIELDS})]
@@ -179,7 +220,7 @@ def _build_argv(payload: dict[str, Any], *, output_path: Path, schematic_path: P
         argv += ["--measure-hd3-noise"]
     if payload.get("evaluation_cache"):
         argv += ["--evaluation-cache"]
-    return argv
+    return argv + runtime_args + ["--max-evaluations", str(payload.get("max_evaluations") or 1000)]
 
 
 def _estimate_timeout_s(payload: dict[str, Any]) -> float:
@@ -192,10 +233,11 @@ def _estimate_timeout_s(payload: dict[str, Any]) -> float:
     a hang guard, not a prediction of normal runtime.
     """
 
-    if payload.get("pvt_condition_set") != "minimal27":
+    if payload.get("pvt_condition_set") not in ("minimal27", "full36"):
         return RUN_TIMEOUT_S
     episodes = max(1, int(payload.get("episodes", 1)))
-    return MINIMAL27_FIXED_OVERHEAD_S + episodes * MINIMAL27_PER_CANDIDATE_S
+    factor = 36 / 27 if payload.get("pvt_condition_set") == "full36" else 1
+    return MINIMAL27_FIXED_OVERHEAD_S + episodes * MINIMAL27_PER_CANDIDATE_S * factor
 
 # ---------------------------------------------------------------------------
 # PVT progress parsing ("Add visible PVT progress to web UI"): the pipeline
@@ -318,13 +360,25 @@ def _execute_run(
 
     timed_out = False
     try:
+        import os
         proc = subprocess.Popen(
             argv, cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=os.name != "nt",
         )
         deadline = time.monotonic() + timeout_s
         stdout, stderr, timed_out = _drain_subprocess_with_progress(proc, run_id, deadline)
         if timed_out:
-            proc.kill()
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               capture_output=True, timeout=15, check=False)
+            else:
+                import signal
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if proc.poll() is None:
+                proc.kill()
             proc.wait()  # reader threads drain the closed pipes after termination
         if proc.stdout is not None:
             proc.stdout.close()
@@ -442,7 +496,7 @@ def _status_payload(run_id: str) -> Optional[dict[str, Any]]:
             payload["pvt_current_corner"] = entry["pvt_current_corner"]
             payload["pvt_current_temperature_c"] = entry["pvt_current_temperature_c"]
             payload["pvt_current_supply_v"] = entry["pvt_current_supply_v"]
-    if entry.get("pvt_condition_set") == "minimal27":
+    if entry.get("pvt_condition_set") in ("minimal27", "full36"):
         # Full 27-point sweep: no ETA (none of this is based on measured
         # data), just an explicit "this is long-running" label.
         payload["pvt_long_running_full_sweep"] = True
@@ -455,6 +509,8 @@ def _available_checkpoints() -> list[str]:
     checkpoints = set(
         str(p.relative_to(PROJECT_ROOT)) for p in results_dir.glob("*.pt")
     ) if results_dir.is_dir() else set()
+    checkpoints.update(str(p.relative_to(PROJECT_ROOT)) for p in RUNS_DIR.glob("*_policy.pt")
+                       if p.is_relative_to(PROJECT_ROOT))
     packaged_checkpoint = "results/autockt_mixed_target_confirmation_policy.pt"
     if packaged_file_exists(PROJECT_ROOT, packaged_checkpoint):
         checkpoints.add(packaged_checkpoint)
@@ -491,7 +547,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "public, max-age=300")
+        self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
 
@@ -499,6 +555,24 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/":
             self._send_html(200, INDEX_HTML)
+        elif re.fullmatch(r"/api/run-graph/[0-9a-f]{32}\.(json|svg)", path):
+            name, fmt = path.rsplit("/", 1)[1].rsplit(".", 1)
+            graph_path = RUNS_DIR / f"{name}.graph.json"
+            if not graph_path.is_file():
+                self._send_json(404, {"error": "No recorded execution graph for this run"})
+                return
+            graph = json.loads(graph_path.read_text(encoding="utf-8"))
+            if fmt == "json" and "limit" in parse_qs(urlparse(self.path).query):
+                # UI overview stays bounded; the download without ?limit retains everything.
+                graph["total_nodes"] = len(graph["nodes"])
+                graph["nodes"] = graph["nodes"][:180]
+                ids = {node["id"] for node in graph["nodes"]}
+                graph["edges"] = [edge for edge in graph["edges"] if edge["source"] in ids and edge["target"] in ids]
+            if fmt == "json":
+                self._send_json(200, graph)
+            else:
+                from analysis.run_graph import render_svg
+                self._send_bytes(200, render_svg(graph).encode("utf-8"), "image/svg+xml")
         elif path == "/api/checkpoints":
             self._send_json(200, {"checkpoints": _available_checkpoints()})
         elif path == "/api/evidence":
@@ -560,6 +634,17 @@ class Handler(BaseHTTPRequestHandler):
                                                  "selection found no feasible design)"})
                 return
             self._send_json(200, {"schematic": schematic_path.read_text(encoding="utf-8")})
+        elif re.fullmatch(r"/api/eye/[0-9a-f]{32}\.(svg|png|json)", path):
+            name, fmt = path.rsplit("/", 1)[1].rsplit(".", 1)
+            eye_path = RUNS_DIR / f"{name}_eye.{fmt}"
+            if not eye_path.is_file():
+                self._send_json(404, {"error": "no measured eye diagram for this run"})
+                return
+            if fmt == "json":
+                self._send_json(200, json.loads(eye_path.read_text(encoding="utf-8")))
+            else:
+                self._send_bytes(200, eye_path.read_bytes(),
+                                 "image/svg+xml" if fmt == "svg" else "image/png")
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -699,7 +784,7 @@ INDEX_HTML = r"""<!doctype html>
       <select id="rlVersion">
         <option value="v1">PPO v1 — historical baseline</option>
         <option value="v2">PPO v2 — corrected reset + validity state + reward v2</option>
-        <option value="v3" disabled>PPO v3 — grouped MOS + passive/bias sizing + area-aware optimization (being implemented)</option>
+        <option value="v3">PPO v3 — eight-head MOS + passive/bias sizing</option>
       </select>
       <p class="hint" id="rlVersionDescription"></p>
       <label style="display:flex; align-items:center; gap:8px; margin-top:12px; cursor:pointer">
@@ -716,6 +801,12 @@ INDEX_HTML = r"""<!doctype html>
           <input id="horizon" type="number" min="1" value="4">
         </div>
       </div>
+      <label for="searchSeconds">Search time budget (seconds; blank = unlimited)</label>
+      <input id="searchSeconds" type="number" min="1" placeholder="Unlimited">
+      <label for="maxEvaluations">Evaluation budget (blank = workflow default)</label>
+      <input id="maxEvaluations" type="number" min="1" placeholder="Workflow default">
+      <label for="workers">Training workers (inference is serial)</label>
+      <select id="workers"><option value="1">1</option><option value="2">2</option></select>
       <label for="initSource">Initial state</label>
       <select id="initSource">
         <option value="verified">Verified (warm start)</option>
@@ -735,10 +826,11 @@ INDEX_HTML = r"""<!doctype html>
       <select id="pvtSet">
         <option value="none">None -- NOMINAL-ONLY (not PVT-robust; only TT/1.8V/27C is checked)</option>
         <option value="smoke">Smoke -- 2 conditions (nominal + 1 stress corner; not a robustness proof)</option>
-        <option value="minimal27">Full 27-point sweep -- TT/SS/FF x VDD+/-5% x 0-125C (SLOW, ~2h/design)</option>
+        <option value="minimal27">27-point subset -- TT/SS/FF (SLOW; incomplete PVT coverage)</option>
+        <option value="full36">Agreed 36-condition grid -- TT/SS/FF (expensive finalist validation)</option>
       </select>
-      <p class="hint">"None" and "smoke" do NOT establish PVT robustness -- only "Full 27-point sweep" does
-        (see docs/autockt-mapping.md sec 22's 27/27 result). The manual real-SPICE demo run used "None".</p>
+      <p class="hint">None, smoke and minimal27 do NOT establish PVT robustness. Only a passing agreed 36-condition TT/SS/FF grid establishes coverage of this configured PVT grid.
+        Smaller sweeps are screening results, not full PVT validation.</p>
       <label for="tradeOff">Trade-off preference (used on PVT ties)</label>
       <select id="tradeOff">
         <option value="most_robust">Most robust</option>
@@ -747,20 +839,29 @@ INDEX_HTML = r"""<!doctype html>
         <option value="widest_eye">Widest eye</option>
         <option value="largest_margin">Largest margin</option>
         <option value="balanced">Balanced</option>
+        <option value="lowest_partial_mos_area">Lowest partial MOS channel area (not total layout)</option>
+        <option value="lowest_noise">Lowest measured noise (only when available)</option>
       </select>
-      <p class="hint">"smoke" spends real SPICE only on nominally-feasible candidates -- not the full 27-point robustness sweep.</p>
+      <p class="hint">"smoke" spends real SPICE only on nominally-feasible candidates; it is a two-condition screen.</p>
     </fieldset>
 
+    <label for="workflow">Operation</label>
+    <select id="workflow"><option value="infer">Generate and verify circuits</option><option value="train">Train a new PPO checkpoint</option></select>
+    <label for="trainingUpdates">Training updates (training only)</label>
+    <input id="trainingUpdates" type="number" value="2" min="1" max="100">
+    <p class="hint">Training uses Episodes per update, Horizon, Backend, Channel and PPO version above. It creates new policy/full-checkpoint files; it does not overwrite the selected checkpoint. Real training spends SPICE time. PVT and final HD3/noise are run afterward using Generate and verify.</p>
     <button id="runBtn">Run NEBULA</button>
     <div id="statusLine"><span id="statusBadge" class="status-badge status-idle">idle</span><span id="elapsed"></span><span id="pvtProgress"></span></div>
   </div>
 
   <div class="panel">
     <div class="card" id="evidenceCard">
-      <h2>Measured performance evidence</h2>
+      <h2>Measured v3 performance evidence</h2>
       <div id="evidenceSummary" class="param-grid"></div>
       <div id="chartGrid" class="chart-grid" style="margin-top:14px"></div>
-      <div id="evidenceMeta" class="evidence-meta">Loading archived evidence…</div>
+      <div id="evidenceMeta" class="evidence-meta">Loading v3 evidence…</div>
+      <label for="runHistory">Recorded run graphs</label>
+      <select id="runHistory"><option value="">Select a previous run</option></select>
     </div>
     <div id="resultsEmpty">Configure a target and click <strong>Run NEBULA</strong> to see results here.</div>
     <div id="errorBox" class="error-box" style="display:none"></div>
@@ -777,6 +878,12 @@ INDEX_HTML = r"""<!doctype html>
       <div class="card" id="pvtCard" style="display:none">
         <h2>PVT robustness</h2>
         <div id="pvtSummary"></div>
+      </div>
+      <div class="card" id="eyeCard" style="display:none">
+        <h2>Selected-design eye diagram</h2>
+        <div id="eyeStatus" class="evidence-meta"></div>
+        <img id="eyeImage" alt="Measured CTLE and behavioral-DFE eye diagram" style="max-width:100%; margin-top:10px">
+        <div class="links" id="eyeLinks" style="margin-top:10px"></div>
       </div>
       <div class="card">
         <h2>Run summary</h2>
@@ -804,7 +911,7 @@ let pollTimer = null;
 const RL_VERSION_DESCRIPTIONS = {
   v1: 'Historical AutoCkt-compatible five-parameter baseline. Preserves the original reset, state and reward behavior for reproducibility.',
   v2: 'Improved five-parameter model. Measures the initial circuit state, encodes metric validity and failure stage, and uses the corrected dense reward. Existing v2 checkpoints remain compatible.',
-  v3: 'Expanded eight-parameter model. Optimizes the five legacy values plus one matched MOS width, length and multiplier group; reports geometry-aware partial area and will use a separately versioned eight-head checkpoint. It remains disabled until the expanded RL/search contract is complete.'
+  v3: 'Eight-head PPO: RLOAD, RDEG, CDEG, ITAIL, behavioral DFE tap, matched MOS width, length and integer multiplier. Measured reset, per-metric validity, channel features and strict peaking-aware reward. Requires a v3 policy; v1/v2 weights are incompatible. Reports partial MOS channel area, NOT total layout area. Synthetic runs are software tests only.'
 };
 
 function updateRlDescription() {
@@ -825,6 +932,8 @@ fetch('/api/checkpoints').then(r => r.json()).then(data => {
     sel.appendChild(opt);
   }
   if (data.checkpoints.length) sel.value = data.checkpoints[0];
+  const v3 = data.checkpoints.find(path => path.replaceAll('\\\\', '/').endsWith('/ppo_v3_tt_1000_policy.pt'));
+  if (v3) { sel.value = v3; $('rlVersion').value = 'v3'; updateRlDescription(); }
 });
 
 function renderChart(chart) {
@@ -841,17 +950,20 @@ function renderChart(chart) {
   return box;
 }
 
-fetch('/api/evidence').then(r=>r.json()).then(data => {
+function refreshEvidence() { return fetch('/api/evidence').then(r=>r.json()).then(data => {
   const s=data.summary;
   $('evidenceSummary').innerHTML =
     `<div><div class="k">PPO evaluations</div><div class="v">${s.ppo_evaluations}</div></div>`+
     `<div><div class="k">Logged target successes</div><div class="v">${s.ppo_logged_successes}</div></div>`+
-    `<div><div class="k">Full PVT</div><div class="v">${s.pvt_passes}/${s.pvt_total}</div></div>`+
-    `<div><div class="k">Feasible designs</div><div class="v">${s.feasible_designs}</div></div>`;
+    `<div><div class="k">TT/SS/FF qualification</div><div class="v">${s.pvt_total ? s.pvt_passes+'/'+s.pvt_total+' passed; '+s.pvt_total+'/36 measured' : 'Not validated'}</div></div>`+
+    `<div><div class="k">Nominal measured points</div><div class="v">${s.feasible_designs}</div></div>`;
+  $('chartGrid').replaceChildren();
   for (const chart of data.charts) $('chartGrid').appendChild(renderChart(chart));
-  $('evidenceMeta').textContent = `${data.charts.length} graphs from ${data.sources.length} archived sources. `+
+  $('evidenceMeta').textContent = `${data.charts.length} v3 graphs from ${data.sources.length} sources. `+
     data.limitations.join(' ');
-}).catch(err => { $('evidenceMeta').textContent='Evidence could not be loaded: '+err; });
+}).catch(err => { $('evidenceMeta').textContent='Evidence could not be loaded: '+err; }); }
+refreshEvidence();
+setInterval(refreshEvidence, 30000);
 
 function setBadge(status) {
   const badge = $('statusBadge');
@@ -859,9 +971,18 @@ function setBadge(status) {
   badge.textContent = status;
 }
 
+fetch('/api/evidence/runs').then(r => r.json()).then(data => {
+  for (const id of data.runs) $('runHistory').add(new Option(id, id));
+});
+$('runHistory').addEventListener('change', () => {
+  if ($('runHistory').value) renderRunEvidence($('runHistory').value).catch(err => showError(String(err)));
+});
+
 function buildPayload() {
   const targetMode = $('targetMode').value;
   const payload = {
+    workflow: $('workflow').value,
+    updates: parseInt($('trainingUpdates').value, 10),
     target_mode: targetMode,
     backend: $('backend').value,
     channel_id: $('channelId').value,
@@ -870,6 +991,9 @@ function buildPayload() {
     checkpoint: $('checkpoint').value || null,
     episodes: parseInt($('episodes').value, 10),
     horizon: parseInt($('horizon').value, 10),
+    search_seconds: $('searchSeconds').value ? Number($('searchSeconds').value) : null,
+    max_evaluations: $('maxEvaluations').value ? Number($('maxEvaluations').value) : null,
+    workers: Number($('workers').value),
     initial_indices_source: $('initSource').value,
     pvt_condition_set: $('pvtSet').value,
     trade_off_preference: $('tradeOff').value,
@@ -895,12 +1019,55 @@ function showError(msg) {
 
 function verdictClass(v) { return 'verdict verdict-' + v.replace(/ /g, '-'); }
 
+async function renderRunEvidence(runId) {
+  let panel = $('runEvidence');
+  if (!panel) {
+    panel = document.createElement('section'); panel.id = 'runEvidence'; panel.className = 'card';
+    $('results').parentNode.appendChild(panel);
+  }
+  panel.replaceChildren();
+  const title = document.createElement('h3'); title.textContent = 'This run: execution graph and measured progress'; panel.appendChild(title);
+  const response = await fetch(`/api/run-graph/${runId}.json?limit=180`);
+  if (!response.ok) { panel.appendChild(document.createTextNode('No recorded graph available for this historical run.')); return; }
+  const graph = await response.json();
+  const note = document.createElement('p'); note.textContent = `${graph.status}: ${graph.evaluation_requests ?? 'in progress'} evaluation requests, ${graph.cache_hits ?? 0} cache hits. Expand a node for actual parameters, metrics, timing and provenance. Synthetic values are not SPICE evidence.`; panel.appendChild(note);
+  const links = document.createElement('p');
+  for (const ext of ['json', 'svg']) { const a = document.createElement('a'); a.href = `/api/run-graph/${runId}.${ext}`; a.textContent = `Download ${ext.toUpperCase()}  `; a.download = ''; links.appendChild(a); } panel.appendChild(links);
+  const image = document.createElement('img'); image.src = `/api/run-graph/${runId}.svg`; image.alt = 'Recorded execution graph'; image.style.maxWidth = '100%'; panel.appendChild(image);
+  for (const node of graph.nodes.slice(0, 180)) {
+    const details = document.createElement('details'); const summary = document.createElement('summary');
+    summary.textContent = `${node.id}: ${node.label} — ${node.status}`;
+    const pre = document.createElement('pre'); pre.style.whiteSpace = 'pre-wrap'; pre.textContent = JSON.stringify(node.detail, null, 2);
+    details.append(summary, pre); panel.appendChild(details);
+  }
+  const evidence = await fetch(`/api/evidence/${runId}`);
+  if (evidence.ok) for (const chart of (await evidence.json()).charts) {
+    const img = document.createElement('img'); img.src = `/api/plot/${runId}/${chart.id}.svg`; img.alt = chart.title; img.style.maxWidth = '100%'; panel.appendChild(img);
+  }
+}
+
 function renderResult(payload) {
   $('errorBox').style.display = 'none';
   $('resultsEmpty').style.display = 'none';
   $('results').style.display = 'block';
 
   const result = payload.result;
+  if (result.workflow === 'train') {
+    $('eyeCard').style.display = 'none';
+    $('paramGrid').textContent = `Training complete. Policy: ${result.policy_path}. Full checkpoint: ${result.full_checkpoint_path}. Training evaluations: ${result.total_evaluations}. This is not a final verified circuit.`;
+    $('specRows').replaceChildren(); $('pvtCard').style.display = 'none';
+    $('runSummary').textContent = `${result.rl_version} / ${result.backend} / ${payload.elapsed_s}s`;
+    $('stdoutLog').textContent = payload.stdout_tail || ''; $('stderrLog').textContent = payload.stderr_tail || '';
+    $('jsonLink').onclick = e => { e.preventDefault(); showJson(result); };
+    $('schematicLink').onclick = e => { e.preventDefault(); showJson({note: 'Training does not export a verified schematic. Run inference with the saved policy.'}); };
+    fetch('/api/checkpoints').then(r => r.json()).then(data => {
+      const current = $('checkpoint').value;
+      $('checkpoint').replaceChildren(new Option('(untrained policy — synthetic only)', ''));
+      for (const path of data.checkpoints) $('checkpoint').add(new Option(path, path));
+      $('checkpoint').value = current;
+    });
+    return;
+  }
   const selected = result.selection && result.selection.selected;
 
   const paramGrid = $('paramGrid');
@@ -934,6 +1101,23 @@ function renderResult(payload) {
       `<div><div class="k">Met minimum</div><div class="v">${pvt.met_minimum_pass_rate}</div></div></div>`;
   } else {
     $('pvtCard').style.display = 'none';
+  }
+
+  const eye = result.eye_diagram;
+  $('eyeCard').style.display = 'block';
+  $('eyeStatus').textContent = eye && eye.status === 'produced'
+    ? 'Generated from one selected-design real-SPICE transient. The second panel is behavioral DFE sample data, not a transistor-level DFE waveform.'
+    : ((eye && eye.reason) || 'Eye diagram was not requested or could not be measured.');
+  $('eyeImage').style.display = eye && eye.status === 'produced' ? 'block' : 'none';
+  $('eyeLinks').replaceChildren();
+  if (eye && eye.status === 'produced') {
+    $('eyeImage').src = `/api/eye/${payload.run_id}.svg`;
+    for (const ext of ['svg', 'png', 'json']) {
+      const link = document.createElement('a');
+      link.href = `/api/eye/${payload.run_id}.${ext}`;
+      link.download = ''; link.textContent = `Download ${ext.toUpperCase()} `;
+      $('eyeLinks').appendChild(link);
+    }
   }
 
   $('runSummary').innerHTML =
@@ -972,7 +1156,7 @@ function pvtProgressText(payload) {
             `${payload.pvt_current_temperature_c}°C / ${payload.pvt_current_supply_v}V)`;
   }
   if (payload.pvt_long_running_full_sweep) {
-    text += ' — full 27-point sweep, long-running';
+    text += ' — requested PVT sweep, long-running';
   }
   return text;
 }
@@ -987,7 +1171,9 @@ function poll(runId) {
       return;
     }
     $('runBtn').disabled = false;
+    renderRunEvidence(runId).catch(err => console.warn('Run evidence unavailable', err));
     if (payload.status === 'completed') {
+      refreshEvidence();
       renderResult(payload);
     } else {
       showError((payload.error || 'run failed') + '\n\nstderr tail:\n' + (payload.stderr_tail || '(empty)'));

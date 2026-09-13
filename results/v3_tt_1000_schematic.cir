@@ -1,0 +1,115 @@
+* ============================================================
+* NEBULA final schematic export
+* Generated: 2026-09-12T05:23:04+00:00
+* Repository commit: 518baf35e906ed5a664f765a24c900af3a5207fa (working tree dirty: True)
+* SKY130 model library: C:\Vyom\AL Code\nebula-integration\.local-pdk\sky130A\libs.tech\ngspice\sky130.nebula_nfet.lib.spice
+* Nominal process corner this file documents: tt
+* ============================================================
+*
+* This is the ACTUAL CTLE circuit (circuits/blocks/ctle.spice,
+* unmodified, .include'd below by absolute path) with this design's
+* final component values set as this file's own .param defaults --
+* a real, syntactically valid SPICE netlist of the designed
+* circuit itself, not a parameter list. It is NOT a complete
+* testbench (no supply/bias sources, no input stimulus, no
+* analysis command) -- instantiate it with your own sources/
+* .control block, or see the verifying bench referenced below for
+* the exact bias/termination/load structure this design was
+* qualified against.
+*
+* Target specification: {'dfe_locked_phase_eye_height_v': 0.1, 'dfe_eye_width_ui': 0.4, 'dfe_min_margin_v': 0.0, 'ctle_power_w': 0.015}
+* Design source: experiments.run_autockt_pipeline, backend=real
+*
+* Final component values:
+*   RLOAD (load resistor)         = 1985.71 ohm
+*   RDEG  (source degeneration R) = 961.429 ohm
+*   CDEG  (source degeneration C) = 9.61429e-13 F
+*   ITAIL (tail bias current)     = 0.000622857 A
+*
+* DFE tap (BEHAVIORAL, not a netlist element -- decision-feedback
+*   correction applied in Python, see docs/stage1-decisions.md):
+*   dfe_tap_v = 0.0571429 V
+*
+* Transistor channel area: 3 um^2 (3e-06 mm^2) -- PARTIAL measurement only,
+*   NOT total circuit area (resistor/capacitor/layout-overhead area are not
+*   modeled anywhere in this project -- see analysis/area_estimate.py). Do NOT
+*   compare this number against the 0.05 mm^2 official budget as if complete.
+*
+* Achieved specifications (as measured, not re-verified by this export):
+*   branch_current_n_a = 0.0003114284892086331
+*   branch_current_p_a = 0.0003114284892086331
+*   branch_current_sum_a = 0.0006228569784172662
+*   channel_aligned_integer_delay_bits = 23
+*   channel_bulk_delay_s = 4.600375344214258e-09
+*   channel_bulk_delay_ui = 23.00187672107129
+*   channel_loss_1p25ghz_db = -4.247022129230723
+*   channel_loss_2p5ghz_db = -6.312316404543054
+*   channel_loss_5ghz_db = -10.926920100012751
+*   channel_max_singular_value = 1.003652382972009
+*   channel_negative_time_energy_ratio = 0.0007507398001901854
+*   channel_reference_ohm = 50.0
+*   ctle_power_w = 0.0011211426
+*   ctle_transient_input_pp_v = 0.8004262634264321
+*   ctle_transient_output_pp_v = 2.426054094643874
+*   dfe_error_count = 0
+*   dfe_error_rate = 0.0
+*   dfe_eye_best_phase_ui = 0.6799999999999999
+*   dfe_eye_height_v = 1.2255939494130503
+*   dfe_eye_width_ui = 0.86
+*   dfe_locked_phase_eye_height_v = 1.2227021136410618
+*   dfe_min_margin_v = 0.44233777902141486
+*   dfe_tap_v = 0.05714285714285683
+*   eye_best_phase_s = 1.6e-10
+*   eye_best_phase_ui = 0.7999999999999999
+*   eye_height_v = 1.3098909821940286
+*   eye_vertical_center_v = 0.01763643286476485
+*   eye_width_ui = 0.7000000000000001
+*   gain_100mhz_db = 3.6638135579802666
+*   gain_10mhz_db = 2.5208659196300958
+*   gain_1mhz_db = 2.507465149222033
+*   gain_1p25ghz_db = 12.871419256951837
+*   gain_2p5ghz_db = 12.761904711793738
+*   gain_5ghz_db = 10.683378996059647
+*   global_peak_frequency_hz = 1701271765.314265
+*   global_peak_gain_db = 13.043622480286068
+*   group_delay_mean_s = -2.458348945672152e-13
+*   group_delay_span_s = 9.00361388406917e-12
+*   hd3_100mv_db = -80.96956204200447
+*   hd3_200mv_db = -68.86134841696774
+*   hd3_50mv_db = -93.0312208873837
+*   hd3_db = -80.96956204200447
+*   input_referred_noise_vrms = 0.00031468334904021617
+*   is_controlled_shelf = 0.0
+*   is_local_peak = 1.0
+*   out_of_band_excess_peak_db = 0.0
+*   output_common_mode_v = 1.181592
+*   output_offset_v = 0.0
+*   partial_mos_channel_area_um2 = 4.6071
+*   peak_frequency_hz = 1701271765.314265
+*   peak_gain_db = 13.043622480286068
+*   peaking_db = 9.379808922305802
+*   response_class = local_peak
+*   sampling_phase_ui = 0.7000000000000001
+*   shelf_delta_2p5_to_5ghz_db = -2.0785257157340915
+*   shelf_high_slope_db_per_decade = -9.37877651684319
+*   shelf_span_2p5_to_5ghz_db = 1.9842802270240938
+*   simulated_bits = 937
+*   source_mismatch_v = 0.0
+*   transient_average_power_w = 0.0011211819364888268
+*   transient_output_max_v = 1.758923658815188
+*   transient_output_min_v = 0.6125024000656814
+*   transient_supply_v = 1.8
+*   vds_n_v = 0.8357391
+*   vds_p_v = 0.8357391
+*
+* Verified against test bench: circuits\benches\receiver_transient.cir
+* (channel-driven full-receiver transient bench; its NRZ stimulus
+*  is synthesized per-run and is not reproduced in this static file --
+*  re-run the evaluation pipeline to reproduce the verifying transient.)
+* ============================================================
+.param RLOAD=1985.71428571429 RDEG=961.428571428571 CDEG=9.61428571428571e-13 ITAIL_VAL=0.000622857142857143 MOS_W=15.357 MOS_L=0.15 MOS_M=1
+.include "C:/Vyom/AL Code/nebula-integration/circuits/blocks/ctle.spice"
+
+XCTLE inp inn outp outn vdd 0 CTLE
++ RLOAD={RLOAD} RDEG={RDEG} CDEG={CDEG} ITAIL_VAL={ITAIL_VAL} MOS_W={MOS_W} MOS_L={MOS_L} MOS_M={MOS_M}
+.end
