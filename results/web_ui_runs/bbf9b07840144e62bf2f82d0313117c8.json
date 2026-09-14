@@ -1,0 +1,117 @@
+{
+  "target": {
+    "dfe_locked_phase_eye_height_v": 0.1,
+    "dfe_eye_width_ui": 0.4,
+    "dfe_min_margin_v": 0.0,
+    "ctle_power_w": 0.015
+  },
+  "backend": "synthetic",
+  "checkpoint_path": "results/autockt_mixed_target_confirmation_policy.pt",
+  "n_candidates_generated": 3,
+  "n_nominally_feasible": 3,
+  "selection": {
+    "selected": {
+      "design_id": "pipeline_ep0",
+      "parameters": {
+        "rload_ohm": 2511.8864315095834,
+        "rdeg_ohm": 446.6835921509629,
+        "cdeg_f": 4.4668359215096347e-13,
+        "itail_a": 0.0006309573444801929,
+        "dfe_tap_v": -0.019047619047619313
+      },
+      "metrics": {
+        "gain_100mhz_db": 0.0,
+        "gain_2p5ghz_db": 0.0,
+        "peaking_db": 0.0,
+        "ctle_power_w": 0.014695055905526545,
+        "output_common_mode_v": 0.0,
+        "dfe_eye_width_ui": 0.5372841169849559,
+        "dfe_min_margin_v": 0.28262360236183637,
+        "dfe_error_rate": 0.0,
+        "channel_loss_2p5ghz_db": 0.0,
+        "dfe_locked_phase_eye_height_v": 0.6785959181658741
+      }
+    },
+    "trade_off_labels": [
+      "balanced"
+    ],
+    "pvt": null,
+    "selection_basis": "nominal-only (no PVT conditions supplied)"
+  },
+  "schematic_path": "/Users/dwitisuchak/nebula/results/web_ui_runs/bbf9b07840144e62bf2f82d0313117c8_schematic.spice",
+  "final_specification": {
+    "design_id": "pipeline_ep0",
+    "parameters": {
+      "rload_ohm": 2511.8864315095834,
+      "rdeg_ohm": 446.6835921509629,
+      "cdeg_f": 4.4668359215096347e-13,
+      "itail_a": 0.0006309573444801929,
+      "dfe_tap_v": -0.019047619047619313
+    },
+    "rows": [
+      {
+        "metric": "Eye width (UI)",
+        "measured": "0.5373",
+        "requirement": "> 0.4 UI",
+        "verdict": "PASS",
+        "source": "pipeline run, backend=synthetic, checkpoint=results/autockt_mixed_target_confirmation_policy.pt"
+      },
+      {
+        "metric": "Eye height (V)",
+        "measured": "0.6786",
+        "requirement": "> 0.1 V (this repo's own EXISTING_THRESHOLDS value -- the official slide's exact mV figure was not independently re-verified against this number in this pass; see docs/autockt-mapping.md sec 21)",
+        "verdict": "PASS",
+        "source": "pipeline run, backend=synthetic, checkpoint=results/autockt_mixed_target_confirmation_policy.pt"
+      },
+      {
+        "metric": "Margin (V)",
+        "measured": "0.2826",
+        "requirement": "> 0 V",
+        "verdict": "PASS",
+        "source": "pipeline run, backend=synthetic, checkpoint=results/autockt_mixed_target_confirmation_policy.pt"
+      },
+      {
+        "metric": "Power (W)",
+        "measured": "0.0147",
+        "requirement": "< 0.015 W (15 mW)",
+        "verdict": "PASS",
+        "source": "pipeline run, backend=synthetic, checkpoint=results/autockt_mixed_target_confirmation_policy.pt"
+      },
+      {
+        "metric": "Peaking (dB)",
+        "measured": "0",
+        "requirement": "3-12 dB, ~1.25-2.5 GHz",
+        "verdict": "FAIL",
+        "source": "pipeline run, backend=synthetic, checkpoint=results/autockt_mixed_target_confirmation_policy.pt"
+      },
+      {
+        "metric": "HD3 (dB)",
+        "measured": null,
+        "requirement": "< -30 dB",
+        "verdict": "NOT CLAIMED",
+        "source": "pipeline run, backend=synthetic, checkpoint=results/autockt_mixed_target_confirmation_policy.pt"
+      },
+      {
+        "metric": "Input-referred noise (Vrms)",
+        "measured": null,
+        "requirement": "< 0.0015 Vrms (1.5 mV)",
+        "verdict": "NOT CLAIMED",
+        "source": "pipeline run, backend=synthetic, checkpoint=results/autockt_mixed_target_confirmation_policy.pt"
+      },
+      {
+        "metric": "Transistor channel area (mm^2)",
+        "measured": "3e-06",
+        "requirement": "< 0.05 mm^2 -- PARTIAL measurement only (channel area, not total circuit area; resistor/capacitor/layout-overhead area are not modeled anywhere in this project -- see analysis/area_estimate.py)",
+        "verdict": "NOT CLAIMED",
+        "source": "/Users/dwitisuchak/nebula/circuits/blocks/ctle.spice"
+      },
+      {
+        "metric": "PVT (pass/total)",
+        "measured": null,
+        "requirement": "TT/SS/FF x VDD+/-5% x 0-125C",
+        "verdict": "NOT CLAIMED",
+        "source": "no PVT result supplied"
+      }
+    ]
+  }
+}

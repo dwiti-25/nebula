@@ -20,7 +20,13 @@
       "Bash(KMP_DUPLICATE_LIB_OK=TRUE conda run -n nebula python -c ' *)",
       "Bash(PYTHONFAULTHANDLER=1 KMP_DUPLICATE_LIB_OK=TRUE conda run -n nebula python -c ' *)",
       "Bash(git check-ignore *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(ngspice -v)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 -c ' *)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE conda run -n nebula python /private/tmp/claude-501/-Users-dwitisuchak-nebula/df4b4643-256d-4200-95e6-512f4cd8657d/scratchpad/build_phase2_artifacts.py)",
+      "Bash(unzip -l artifacts/NEBULA_phase2_experimental_artifacts.zip)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(list\\(d.keys\\(\\)\\)\\)\")"
     ]
   }
 }

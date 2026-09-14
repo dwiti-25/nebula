@@ -1,0 +1,225 @@
+{
+  "cem_runs": [
+    {
+      "best_index": 0,
+      "best_parameters": {
+        "cdeg_f": 9.439018219215525e-13,
+        "dfe_tap_v": -0.018746120912122022,
+        "itail_a": 0.0007682360800131996,
+        "rdeg_ohm": 751.89376386198,
+        "rload_ohm": 2228.7475967486494
+      },
+      "best_parameters_reconstructed_from_action": true,
+      "best_reward": 100.0,
+      "caveats": [
+        "configured for 3 iterations x population 10 = 30 planned evaluations; file contains 13 rows (iterations 1-2 plus one row of iteration 3) -- this run appears interrupted/incomplete, not a completed 30-eval trial",
+        "experiments/train_cem.py seeds its initial sampling distribution at a fixed mean=[0.3697, 0.2767, 0.3333, 0.7802, -0.0277] (normalized action space) with std=0.15 per dimension -- a Gaussian localized in a specific, already-decent region, not the uniform(-1, 1)^5 coverage receiver_search.py's 'uniform' sampling_policy uses. Some or all of CEM's higher raw success rate below reflects this warm-start neighborhood advantage, not only CEM's population/elite refinement mechanism -- the two runs are not a controlled comparison of search *algorithm* alone."
+      ],
+      "evaluations_to_first_success": 1,
+      "failure_stage_counts": {
+        "ac": 4,
+        "setup": 1
+      },
+      "method": "cem",
+      "n_evaluations": 13,
+      "n_successes": 8,
+      "reward_mean": 23.076923076923077,
+      "reward_stdev": 97.30085108210399,
+      "schema": "cem_v1",
+      "source_file": "results/cem_baseline_3x10.jsonl",
+      "success_rate": 0.6153846153846154,
+      "wall_clock_available": false,
+      "wall_clock_mean_s": null,
+      "wall_clock_total_s": null
+    },
+    {
+      "best_index": 0,
+      "best_parameters": {
+        "cdeg_f": 9.439018219215525e-13,
+        "dfe_tap_v": -0.018746120912122022,
+        "itail_a": 0.0007682360800131996,
+        "rdeg_ohm": 751.89376386198,
+        "rload_ohm": 2228.7475967486494
+      },
+      "best_parameters_reconstructed_from_action": true,
+      "best_reward": 100.0,
+      "caveats": [
+        "rows 1-5 are byte-identical to the first 5 rows of results/cem_baseline_3x10.jsonl (same seed/mean/std init) -- an earlier checkpoint of the same run, not an independent trial; kept for completeness but should not be double-counted alongside cem_baseline_3x10.jsonl in an aggregate"
+      ],
+      "evaluations_to_first_success": 1,
+      "failure_stage_counts": {
+        "ac": 2
+      },
+      "method": "cem",
+      "n_evaluations": 5,
+      "n_successes": 3,
+      "reward_mean": 20.0,
+      "reward_stdev": 97.97958971132712,
+      "schema": "cem_v1",
+      "source_file": "results/cem_near_good_v2.jsonl",
+      "success_rate": 0.6,
+      "wall_clock_available": false,
+      "wall_clock_mean_s": null,
+      "wall_clock_total_s": null
+    },
+    {
+      "best_index": 0,
+      "best_parameters": {
+        "cdeg_f": 2.1529116489915856e-13,
+        "dfe_tap_v": -0.05103531351315482,
+        "itail_a": 0.0005034817407860454,
+        "rdeg_ohm": 174.03820664192355,
+        "rload_ohm": 717.6450116565957
+      },
+      "best_parameters_reconstructed_from_action": true,
+      "best_reward": -100.0,
+      "caveats": [
+        "byte-identical to results/cem_smoke.jsonl -- same run logged twice"
+      ],
+      "evaluations_to_first_success": null,
+      "failure_stage_counts": {
+        "ac": 1,
+        "dc": 8,
+        "setup": 1
+      },
+      "method": "cem",
+      "n_evaluations": 10,
+      "n_successes": 0,
+      "reward_mean": -100.0,
+      "reward_stdev": 0.0,
+      "schema": "cem_v1",
+      "source_file": "results/cem_near_good.jsonl",
+      "success_rate": 0.0,
+      "wall_clock_available": false,
+      "wall_clock_mean_s": null,
+      "wall_clock_total_s": null
+    },
+    {
+      "best_index": 0,
+      "best_parameters": {
+        "cdeg_f": 2.1529116489915856e-13,
+        "dfe_tap_v": -0.05103531351315482,
+        "itail_a": 0.0005034817407860454,
+        "rdeg_ohm": 174.03820664192355,
+        "rload_ohm": 717.6450116565957
+      },
+      "best_parameters_reconstructed_from_action": true,
+      "best_reward": -100.0,
+      "caveats": [
+        "byte-identical to results/cem_near_good.jsonl -- same run logged twice"
+      ],
+      "evaluations_to_first_success": null,
+      "failure_stage_counts": {
+        "dc": 2,
+        "setup": 1
+      },
+      "method": "cem",
+      "n_evaluations": 3,
+      "n_successes": 0,
+      "reward_mean": -100.0,
+      "reward_stdev": 0.0,
+      "schema": "cem_v1",
+      "source_file": "results/cem_smoke.jsonl",
+      "success_rate": 0.0,
+      "wall_clock_available": false,
+      "wall_clock_mean_s": null,
+      "wall_clock_total_s": null
+    }
+  ],
+  "excluded_out_of_scope": [
+    {
+      "file": "results/random_search.jsonl",
+      "reason": "CTLE-block-only sweep (uppercase RLOAD/RDEG/CDEG/ITAIL_VAL keys, gain_*_db metrics) -- pre-receiver-integration circuit scope, not comparable to full-receiver random search"
+    },
+    {
+      "file": "results/ctle_search_20.jsonl",
+      "reason": "CTLE-block-only sweep, same schema/scope note as random_search.jsonl"
+    },
+    {
+      "file": "results/test_search.jsonl",
+      "reason": "CTLE-block-only sweep fixture (identical schema to ctle_search_20.jsonl)"
+    },
+    {
+      "file": "results/receiver_search.jsonl",
+      "reason": "1-row raw-ReceiverEvaluation-dump fixture (no candidate_index/action/reward fields) -- superseded by experiments/receiver_search.py's current row schema"
+    },
+    {
+      "file": "results/receiver_search_1.jsonl",
+      "reason": "1-row raw-ReceiverEvaluation-dump fixture, same note as receiver_search.jsonl"
+    },
+    {
+      "file": "results/receiver_search_3.jsonl",
+      "reason": "3-row raw-ReceiverEvaluation-dump fixture, no documented seed/manifest"
+    },
+    {
+      "file": "results/receiver_search_10.jsonl",
+      "reason": "10-row raw-ReceiverEvaluation-dump fixture, no documented seed/manifest"
+    }
+  ],
+  "headline_comparison": {
+    "best_reward": {
+      "cem": 100.0,
+      "random_search": 100.0
+    },
+    "cem_file": "results/cem_baseline_3x10.jsonl",
+    "evaluations_to_first_success": {
+      "cem": 1,
+      "random_search": 9
+    },
+    "initialization_asymmetry_caveat": "experiments/train_cem.py seeds its initial sampling distribution at a fixed mean=[0.3697, 0.2767, 0.3333, 0.7802, -0.0277] (normalized action space) with std=0.15 per dimension -- a Gaussian localized in a specific, already-decent region, not the uniform(-1, 1)^5 coverage receiver_search.py's 'uniform' sampling_policy uses. Some or all of CEM's higher raw success rate below reflects this warm-start neighborhood advantage, not only CEM's population/elite refinement mechanism -- the two runs are not a controlled comparison of search *algorithm* alone.",
+    "random_search_file": "results/receiver_random_search_20_seed123.jsonl",
+    "sample_size_caveat": "random_search n=20 vs cem n=13 (cem run is incomplete, see its caveats) -- not a like-for-like sample size; treat any rate comparison as directional only",
+    "spice_evaluation_count": {
+      "cem": 13,
+      "random_search": 20
+    },
+    "success_rate": {
+      "cem": 0.6153846153846154,
+      "random_search": 0.05
+    },
+    "wall_clock_available": {
+      "cem": false,
+      "random_search": false
+    }
+  },
+  "not_yet_measured": [
+    "wall-clock/design time for any run recorded before this session's timing instrumentation (train_cem.py, receiver_search.py) -- no existing row of receiver_random_search_20_seed123.jsonl or cem_baseline_3x10.jsonl carries a timestamp or duration",
+    "a completed (30-evaluation) CEM run at the same n as the seed=123 random search, for a like-for-like success-rate comparison",
+    "PPO/AutoCkt results in this same normalized comparison framework -- deferred until the running real-SPICE PPO confirmation experiment finishes and its result file is finalized",
+    "per-metric (eye height / eye width / margin / power) design-quality comparison for CEM's successful candidates -- CEM's historical rows never logged simulator metrics, only reward_v1's scalar reward",
+    "a CEM run initialized with the same uniform(-1, 1)^5 coverage random search uses (rather than train_cem.py's fixed near-good Gaussian mean) -- needed to isolate the search-algorithm effect from the initialization effect, see initialization_asymmetry_caveat above"
+  ],
+  "random_search_runs": [
+    {
+      "best_index": 8,
+      "best_parameters": {
+        "cdeg_f": 9.999375862792168e-13,
+        "dfe_tap_v": -0.011090823885148815,
+        "itail_a": 0.0006028331705063624,
+        "rdeg_ohm": 822.3558626926603,
+        "rload_ohm": 2342.472156058411
+      },
+      "best_parameters_reconstructed_from_action": false,
+      "best_reward": 100.0,
+      "caveats": [
+        "documented seed=123, uniform sampling policy, n=20, full-receiver schema with per-candidate metrics; the only random-search run with a manifest.json and summary.json on disk"
+      ],
+      "evaluations_to_first_success": 9,
+      "failure_stage_counts": {
+        "ac": 4,
+        "dc": 15
+      },
+      "method": "random_search",
+      "n_evaluations": 20,
+      "n_successes": 1,
+      "reward_mean": -90.0,
+      "reward_stdev": 43.58898943540674,
+      "schema": "receiver_search_v2",
+      "source_file": "results/receiver_random_search_20_seed123.jsonl",
+      "success_rate": 0.05,
+      "wall_clock_available": false,
+      "wall_clock_mean_s": null,
+      "wall_clock_total_s": null
+    }
+  ]
+}

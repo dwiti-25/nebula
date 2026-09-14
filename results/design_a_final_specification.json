@@ -1,0 +1,75 @@
+{
+  "design_id": "design_a",
+  "parameters": {
+    "rload_ohm": 2342.472156058411,
+    "rdeg_ohm": 822.3558626926603,
+    "cdeg_f": 9.999375862792168e-13,
+    "itail_a": 0.0006028331705063624,
+    "dfe_tap_v": -0.011090823885148815
+  },
+  "rows": [
+    {
+      "metric": "Eye width (UI)",
+      "measured": "0.87",
+      "requirement": "> 0.4 UI",
+      "verdict": "PASS",
+      "source": "results/design_a_pvt_minimal27_rerun.jsonl (tt/1.8V/27C point)"
+    },
+    {
+      "metric": "Eye height (V)",
+      "measured": "1.555",
+      "requirement": "> 0.1 V (this repo's own EXISTING_THRESHOLDS value -- the official slide's exact mV figure was not independently re-verified against this number in this pass; see docs/autockt-mapping.md sec 21)",
+      "verdict": "PASS",
+      "source": "results/design_a_pvt_minimal27_rerun.jsonl (tt/1.8V/27C point)"
+    },
+    {
+      "metric": "Margin (V)",
+      "measured": "0.5255",
+      "requirement": "> 0 V",
+      "verdict": "PASS",
+      "source": "results/design_a_pvt_minimal27_rerun.jsonl (tt/1.8V/27C point)"
+    },
+    {
+      "metric": "Power (W)",
+      "measured": "0.001085",
+      "requirement": "< 0.015 W (15 mW)",
+      "verdict": "PASS",
+      "source": "results/design_a_pvt_minimal27_rerun.jsonl (tt/1.8V/27C point)"
+    },
+    {
+      "metric": "Peaking (dB)",
+      "measured": "7.071",
+      "requirement": "3-12 dB, ~1.25-2.5 GHz",
+      "verdict": "PASS",
+      "source": "results/design_a_pvt_minimal27_rerun.jsonl (tt/1.8V/27C point)"
+    },
+    {
+      "metric": "HD3 (dB)",
+      "measured": "-79.93",
+      "requirement": "< -30 dB",
+      "verdict": "PASS",
+      "source": "results/design_a_pvt_minimal27_rerun.jsonl (tt/1.8V/27C point)"
+    },
+    {
+      "metric": "Input-referred noise (Vrms)",
+      "measured": "0.0003614",
+      "requirement": "< 0.0015 Vrms (1.5 mV)",
+      "verdict": "PASS",
+      "source": "results/design_a_pvt_minimal27_rerun.jsonl (tt/1.8V/27C point)"
+    },
+    {
+      "metric": "Transistor channel area (mm^2)",
+      "measured": "3e-06",
+      "requirement": "< 0.05 mm^2 -- PARTIAL measurement only (channel area, not total circuit area; resistor/capacitor/layout-overhead area are not modeled anywhere in this project -- see analysis/area_estimate.py)",
+      "verdict": "NOT CLAIMED",
+      "source": "/Users/dwitisuchak/nebula/circuits/blocks/ctle.spice"
+    },
+    {
+      "metric": "PVT (pass/total)",
+      "measured": "27/27",
+      "requirement": "TT/SS/FF x VDD+/-5% x 0-125C",
+      "verdict": "PASS",
+      "source": "27-point sweep, design_id=design_a"
+    }
+  ]
+}

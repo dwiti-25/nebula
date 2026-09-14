@@ -1,0 +1,60 @@
+* ============================================================
+* NEBULA final schematic export
+* Generated: 2026-09-01T21:24:08+00:00
+* Repository commit: 22ad9f7914ff9e93618ab298d9fa35f31ad1c393 (working tree dirty: True)
+* SKY130 model library: /Users/dwitisuchak/.ciel/ciel/sky130/versions/026824c7969ce6f4fc9678e6ca04b0a06a596c4b/sky130A/libs.tech/ngspice/sky130.lib.spice
+* Nominal process corner this file documents: tt
+* ============================================================
+*
+* This is the ACTUAL CTLE circuit (circuits/blocks/ctle.spice,
+* unmodified, .include'd below by absolute path) with this design's
+* final component values set as this file's own .param defaults --
+* a real, syntactically valid SPICE netlist of the designed
+* circuit itself, not a parameter list. It is NOT a complete
+* testbench (no supply/bias sources, no input stimulus, no
+* analysis command) -- instantiate it with your own sources/
+* .control block, or see the verifying bench referenced below for
+* the exact bias/termination/load structure this design was
+* qualified against.
+*
+* Target specification: {'dfe_locked_phase_eye_height_v': 0.1, 'dfe_eye_width_ui': 0.4, 'dfe_min_margin_v': 0.0, 'ctle_power_w': 0.015}
+* Design source: experiments.run_autockt_pipeline, backend=synthetic
+*
+* Final component values:
+*   RLOAD (load resistor)         = 1995.26 ohm
+*   RDEG  (source degeneration R) = 223.872 ohm
+*   CDEG  (source degeneration C) = 2.23872e-13 F
+*   ITAIL (tail bias current)     = 0.000199526 A
+*
+* DFE tap (BEHAVIORAL, not a netlist element -- decision-feedback
+*   correction applied in Python, see docs/stage1-decisions.md):
+*   dfe_tap_v = -0.0190476 V
+*
+* Transistor channel area: 3 um^2 (3e-06 mm^2) -- PARTIAL measurement only,
+*   NOT total circuit area (resistor/capacitor/layout-overhead area are not
+*   modeled anywhere in this project -- see analysis/area_estimate.py). Do NOT
+*   compare this number against the 0.05 mm^2 official budget as if complete.
+*
+* Achieved specifications (as measured, not re-verified by this export):
+*   channel_loss_2p5ghz_db = 0.0
+*   ctle_power_w = 0.008296383441662718
+*   dfe_error_rate = 0.0
+*   dfe_eye_width_ui = 0.7201033302382082
+*   dfe_locked_phase_eye_height_v = 0.9413985372174241
+*   dfe_min_margin_v = 0.442590413958432
+*   gain_100mhz_db = 0.0
+*   gain_2p5ghz_db = 0.0
+*   output_common_mode_v = 0.0
+*   peaking_db = 0.0
+*
+* Verified against test bench: circuits/benches/receiver_transient.cir
+* (channel-driven full-receiver transient bench; its NRZ stimulus
+*  is synthesized per-run and is not reproduced in this static file --
+*  re-run the evaluation pipeline to reproduce the verifying transient.)
+* ============================================================
+.param RLOAD=1995.26231496888 RDEG=223.872113856834 CDEG=2.23872113856833e-13 ITAIL_VAL=0.000199526231496888
+.include "/Users/dwitisuchak/nebula/circuits/blocks/ctle.spice"
+
+XCTLE inp inn outp outn vdd 0 CTLE
++ RLOAD={RLOAD} RDEG={RDEG} CDEG={CDEG} ITAIL_VAL={ITAIL_VAL}
+.end
