@@ -26,6 +26,22 @@ DEFAULT_RUNS_DIR = PROJECT_ROOT / "results" / "llm_wrapper_runs"
 DEFAULT_TIMEOUT_S = 1800.0  # generous but bounded; --backend real + PVT sweeps can be slow
 
 
+# Substrings of known checkpoint-incompatibility errors raised by
+# rl/runtime_contract.py::validate_inference_contract / grids_from_contract
+# and experiments/run_autockt_pipeline.py::generate_candidates -- surfaced
+# as a distinct, clear error rather than a raw stack-trace dump (Phase 2:
+# "add a clear error if the checkpoint is missing or incompatible").
+_CHECKPOINT_ERROR_MARKERS = (
+    "requires a v3 metadata-bearing policy export",
+    "Incompatible v3 checkpoint",
+    "does not match the requested PPO version",
+    "Checkpoint state schema does not match",
+    "Invalid v3 checkpoint",
+    "checkpoint not found",
+    "state schema does not match",
+)
+
+
 @dataclass(frozen=True)
 class WrapperReport:
     request: str
@@ -36,12 +52,14 @@ class WrapperReport:
     unquantified_notes: tuple[str, ...]
     backend: str
     checkpoint_path: str | None
+    rl_version: str
     runtime_s: float
     pipeline_argv: list[str]
     pipeline_exit_code: int
     selected_parameters: dict[str, float] | None
     spec_rows: list[dict[str, str | None]]
     selection_reason: str | None
+    checkpoint_error: str | None = None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -94,6 +112,7 @@ def summarize_result(
     unquantified_notes: tuple[str, ...],
     backend: str,
     checkpoint: str | None,
+    rl_version: str,
     runtime_s: float,
     pipeline_argv: list[str],
     process: subprocess.CompletedProcess,
@@ -129,8 +148,22 @@ def summarize_result(
     for note in unquantified_notes:
         warnings.append(note)
 
+    checkpoint_error: str | None = None
     if process.returncode != 0:
-        warnings.append(f"pipeline exited with code {process.returncode}: {process.stderr.strip()[-2000:]}")
+        stderr_tail = process.stderr.strip()[-4000:]
+        marker = next((m for m in _CHECKPOINT_ERROR_MARKERS if m in stderr_tail), None)
+        if marker is not None:
+            # Extract the specific ValueError line for a clean, non-stack-trace message.
+            error_line = next(
+                (line for line in reversed(stderr_tail.splitlines()) if marker in line), marker,
+            )
+            checkpoint_error = (
+                f"checkpoint '{checkpoint}' is missing or incompatible with --rl-version {rl_version}: "
+                f"{error_line.strip()}"
+            )
+            warnings.append(checkpoint_error)
+        else:
+            warnings.append(f"pipeline exited with code {process.returncode}: {stderr_tail[-2000:]}")
 
     selected_parameters: dict[str, float] | None = None
     spec_rows: list[dict[str, str | None]] = []
@@ -142,6 +175,9 @@ def summarize_result(
         if final_spec is not None:
             selected_parameters = final_spec.get("parameters")
             spec_rows = final_spec.get("rows", [])
+            for label, substring in (("PVT", "PVT"), ("HD3", "HD3"), ("noise", "noise")):
+                if _status_for(spec_rows, substring).startswith("NOT CLAIMED"):
+                    warnings.append(f"{label} was NOT CLAIMED for this run (not executed) -- not a pass.")
         else:
             warnings.append(
                 "no feasible design was selected for this target -- "
@@ -157,12 +193,14 @@ def summarize_result(
         unquantified_notes=unquantified_notes,
         backend=backend,
         checkpoint_path=checkpoint,
+        rl_version=rl_version,
         runtime_s=runtime_s,
         pipeline_argv=pipeline_argv,
         pipeline_exit_code=process.returncode,
         selected_parameters=selected_parameters,
         spec_rows=spec_rows,
         selection_reason=selection_reason,
+        checkpoint_error=checkpoint_error,
         warnings=warnings,
     )
 
@@ -175,6 +213,24 @@ def _status_for(spec_rows: list[dict[str, str | None]], metric_substring: str) -
     if len(verdicts) == 1:
         return verdicts.pop()
     return "/".join(sorted(verdicts))
+
+
+def _measured_for(spec_rows: list[dict[str, str | None]], metric_prefix: str) -> str:
+    row = next((r for r in spec_rows if r["metric"].lower().startswith(metric_prefix.lower())), None)
+    if row is None:
+        return "NOT CLAIMED"
+    measured = row["measured"] if row["measured"] is not None else "n/a"
+    return f"{measured} ({row['verdict']})"
+
+
+def _overall_verdict(report: WrapperReport) -> str:
+    if report.checkpoint_error:
+        return "ERROR (checkpoint incompatible -- see warnings)"
+    if report.selected_parameters is None:
+        return "NO FEASIBLE DESIGN"
+    if any(row["verdict"] == "FAIL" for row in report.spec_rows):
+        return "FAIL"
+    return "PASS"
 
 
 def format_report(report: WrapperReport) -> str:
@@ -193,6 +249,7 @@ def format_report(report: WrapperReport) -> str:
         lines.append(f"  {marker} {name:35s} = {value:.6g}")
     lines += [
         "",
+        f"RL version: {report.rl_version}",
         f"Backend used: {report.backend}",
         f"Checkpoint: {report.checkpoint_path or '(none -- untrained policy, see warnings)'}",
         f"Runtime: {report.runtime_s:.2f}s",
@@ -218,6 +275,29 @@ def format_report(report: WrapperReport) -> str:
     if report.warnings:
         lines += ["", "Warnings:"]
         lines += [f"  - {w}" for w in report.warnings]
+
+    lines += [
+        "",
+        "## NEBULA FINAL RESULT",
+        "",
+        f"Request: {report.request}",
+        f"RL version: {report.rl_version}",
+        f"Checkpoint: {report.checkpoint_path or 'none (untrained)'}",
+        f"Backend: {report.backend}",
+        f"Runtime: {report.runtime_s:.2f}s",
+        "",
+        f"Eye width:              {_measured_for(report.spec_rows, 'Eye width')}",
+        f"Eye height:             {_measured_for(report.spec_rows, 'Eye height')}",
+        f"Margin:                 {_measured_for(report.spec_rows, 'Margin')}",
+        f"Power:                  {_measured_for(report.spec_rows, 'Power')}",
+        f"Peaking:                {_measured_for(report.spec_rows, 'Peaking')}",
+        f"HD3:                    {_measured_for(report.spec_rows, 'HD3')}",
+        f"Input-referred noise:   {_measured_for(report.spec_rows, 'Input-referred noise')}",
+        f"PVT:                    {_measured_for(report.spec_rows, 'PVT')}",
+        "",
+        f"Overall verdict: {_overall_verdict(report)}",
+        f"Warnings: {len(report.warnings)}" + (" (see above)" if report.warnings else " (none)"),
+    ]
 
     return "\n".join(lines)
 
@@ -288,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     report = summarize_result(
         request=args.request, provider_result=provider_result,
         unquantified_notes=provider_result.parsed.unquantified_notes,
-        backend=args.backend, checkpoint=args.checkpoint, runtime_s=runtime_s,
+        backend=args.backend, checkpoint=args.checkpoint, rl_version=args.rl_version, runtime_s=runtime_s,
         pipeline_argv=pipeline_argv, process=process, pipeline_result=pipeline_result,
     )
 

@@ -180,7 +180,7 @@ class MetricPropagationTests(unittest.TestCase):
         report = summarize_result(
             request="Design a low-power receiver with eye width above 0.4 UI and power below 15 mW.",
             provider_result=_provider_result(), unquantified_notes=(), backend="synthetic",
-            checkpoint="results/policy.pt", runtime_s=2.5, pipeline_argv=["python"],
+            checkpoint="results/policy.pt", rl_version="v1", runtime_s=2.5, pipeline_argv=["python"],
             process=_fake_process(0), pipeline_result=_FEASIBLE_PIPELINE_RESULT,
         )
         self.assertEqual(report.selected_parameters["rload_ohm"], 2511.89)
@@ -193,7 +193,7 @@ class MetricPropagationTests(unittest.TestCase):
     def test_format_report_renders_the_propagated_rows(self):
         report = summarize_result(
             request="req", provider_result=_provider_result(), unquantified_notes=(),
-            backend="synthetic", checkpoint="results/policy.pt", runtime_s=1.0,
+            backend="synthetic", checkpoint="results/policy.pt", rl_version="v1", runtime_s=1.0,
             pipeline_argv=["python"], process=_fake_process(0), pipeline_result=_FEASIBLE_PIPELINE_RESULT,
         )
         text = format_report(report)
@@ -206,7 +206,7 @@ class NotClaimedStatusTests(unittest.TestCase):
     def test_hd3_noise_pvt_report_not_claimed_when_unmeasured(self):
         report = summarize_result(
             request="req", provider_result=_provider_result(), unquantified_notes=(),
-            backend="synthetic", checkpoint="results/policy.pt", runtime_s=1.0,
+            backend="synthetic", checkpoint="results/policy.pt", rl_version="v1", runtime_s=1.0,
             pipeline_argv=["python"], process=_fake_process(0), pipeline_result=_FEASIBLE_PIPELINE_RESULT,
         )
         text = format_report(report)
@@ -217,7 +217,7 @@ class NotClaimedStatusTests(unittest.TestCase):
     def test_synthetic_backend_warns_metrics_are_not_real_measurements(self):
         report = summarize_result(
             request="req", provider_result=_provider_result(), unquantified_notes=(),
-            backend="synthetic", checkpoint="results/policy.pt", runtime_s=1.0,
+            backend="synthetic", checkpoint="results/policy.pt", rl_version="v1", runtime_s=1.0,
             pipeline_argv=["python"], process=_fake_process(0), pipeline_result=_FEASIBLE_PIPELINE_RESULT,
         )
         self.assertTrue(any("NOT real circuit measurements" in w for w in report.warnings))
@@ -225,7 +225,7 @@ class NotClaimedStatusTests(unittest.TestCase):
     def test_missing_checkpoint_warns_policy_is_untrained(self):
         report = summarize_result(
             request="req", provider_result=_provider_result(), unquantified_notes=(),
-            backend="synthetic", checkpoint=None, runtime_s=1.0,
+            backend="synthetic", checkpoint=None, rl_version="v1", runtime_s=1.0,
             pipeline_argv=["python"], process=_fake_process(0), pipeline_result=_FEASIBLE_PIPELINE_RESULT,
         )
         self.assertTrue(any("UNTRAINED policy" in w for w in report.warnings))
@@ -235,7 +235,7 @@ class NoFabricatedResultsTests(unittest.TestCase):
     def test_no_selected_design_reports_no_parameters_and_no_metrics(self):
         report = summarize_result(
             request="req", provider_result=_provider_result(), unquantified_notes=(),
-            backend="synthetic", checkpoint="results/policy.pt", runtime_s=1.0,
+            backend="synthetic", checkpoint="results/policy.pt", rl_version="v1", runtime_s=1.0,
             pipeline_argv=["python"], process=_fake_process(0), pipeline_result=_INFEASIBLE_PIPELINE_RESULT,
         )
         self.assertIsNone(report.selected_parameters)
@@ -246,7 +246,7 @@ class NoFabricatedResultsTests(unittest.TestCase):
     def test_no_selected_design_report_text_does_not_print_a_parameter_table(self):
         report = summarize_result(
             request="req", provider_result=_provider_result(), unquantified_notes=(),
-            backend="synthetic", checkpoint="results/policy.pt", runtime_s=1.0,
+            backend="synthetic", checkpoint="results/policy.pt", rl_version="v1", runtime_s=1.0,
             pipeline_argv=["python"], process=_fake_process(0), pipeline_result=_INFEASIBLE_PIPELINE_RESULT,
         )
         text = format_report(report)
@@ -256,7 +256,7 @@ class NoFabricatedResultsTests(unittest.TestCase):
     def test_missing_pipeline_output_does_not_crash_or_invent_a_result(self):
         report = summarize_result(
             request="req", provider_result=_provider_result(), unquantified_notes=(),
-            backend="synthetic", checkpoint="results/policy.pt", runtime_s=1.0,
+            backend="synthetic", checkpoint="results/policy.pt", rl_version="v1", runtime_s=1.0,
             pipeline_argv=["python"], process=_fake_process(1, stderr="boom"), pipeline_result=None,
         )
         self.assertIsNone(report.selected_parameters)
@@ -266,10 +266,157 @@ class NoFabricatedResultsTests(unittest.TestCase):
     def test_llm_fallback_is_disclosed_as_a_warning_not_hidden(self):
         report = summarize_result(
             request="req", provider_result=_provider_result(fallback_reason="AuthenticationError: invalid api key"),
-            unquantified_notes=(), backend="synthetic", checkpoint="results/policy.pt", runtime_s=1.0,
+            unquantified_notes=(), backend="synthetic", checkpoint="results/policy.pt", rl_version="v1", runtime_s=1.0,
             pipeline_argv=["python"], process=_fake_process(0), pipeline_result=_FEASIBLE_PIPELINE_RESULT,
         )
         self.assertTrue(any("fallback" in w.lower() for w in report.warnings))
+
+
+class Rlv3ArgvPropagationTests(unittest.TestCase):
+    """Phase 8: real backend / HD3+noise / full36 PVT / v3 argv propagation."""
+
+    def test_real_backend_is_propagated(self):
+        argv = build_pipeline_argv(
+            target=dict(DEFAULT_TARGET), output_path=Path("/tmp/x.json"), backend="real",
+            checkpoint="results/ppo_v3_tt_1000_policy.pt", rl_version="v3", episodes=3, horizon=4,
+            measure_hd3_noise=False, pvt_condition_set="none",
+        )
+        self.assertEqual(argv[argv.index("--backend") + 1], "real")
+
+    def test_rl_version_v3_is_propagated(self):
+        argv = build_pipeline_argv(
+            target=dict(DEFAULT_TARGET), output_path=Path("/tmp/x.json"), backend="real",
+            checkpoint="results/ppo_v3_tt_1000_policy.pt", rl_version="v3", episodes=3, horizon=4,
+            measure_hd3_noise=False, pvt_condition_set="none",
+        )
+        self.assertEqual(argv[argv.index("--rl-version") + 1], "v3")
+
+    def test_measure_hd3_noise_flag_is_propagated(self):
+        argv = build_pipeline_argv(
+            target=dict(DEFAULT_TARGET), output_path=Path("/tmp/x.json"), backend="real",
+            checkpoint="results/ppo_v3_tt_1000_policy.pt", rl_version="v3", episodes=3, horizon=4,
+            measure_hd3_noise=True, pvt_condition_set="none",
+        )
+        self.assertIn("--measure-hd3-noise", argv)
+
+    def test_full36_pvt_condition_set_is_propagated(self):
+        argv = build_pipeline_argv(
+            target=dict(DEFAULT_TARGET), output_path=Path("/tmp/x.json"), backend="real",
+            checkpoint="results/ppo_v3_tt_1000_policy.pt", rl_version="v3", episodes=3, horizon=4,
+            measure_hd3_noise=True, pvt_condition_set="full36",
+        )
+        self.assertEqual(argv[argv.index("--pvt-condition-set") + 1], "full36")
+
+
+class Rlv3ReportFieldsTests(unittest.TestCase):
+    def test_rl_version_appears_in_the_report(self):
+        report = summarize_result(
+            request="req", provider_result=_provider_result(), unquantified_notes=(),
+            backend="real", checkpoint="results/ppo_v3_tt_1000_policy.pt", rl_version="v3", runtime_s=1.0,
+            pipeline_argv=["python"], process=_fake_process(0), pipeline_result=_FEASIBLE_PIPELINE_RESULT,
+        )
+        self.assertEqual(report.rl_version, "v3")
+        text = format_report(report)
+        self.assertIn("RL version: v3", text)
+        self.assertIn("## NEBULA FINAL RESULT", text)
+        self.assertIn("Overall verdict:", text)
+
+    def test_pvt_hd3_noise_not_claimed_produces_explicit_warnings(self):
+        report = summarize_result(
+            request="req", provider_result=_provider_result(), unquantified_notes=(),
+            backend="real", checkpoint="results/ppo_v3_tt_1000_policy.pt", rl_version="v3", runtime_s=1.0,
+            pipeline_argv=["python"], process=_fake_process(0), pipeline_result=_FEASIBLE_PIPELINE_RESULT,
+        )
+        joined = " ".join(report.warnings)
+        self.assertIn("PVT was NOT CLAIMED", joined)
+        self.assertIn("HD3 was NOT CLAIMED", joined)
+        self.assertIn("noise was NOT CLAIMED", joined)
+
+    def test_overall_verdict_is_pass_only_when_no_row_fails(self):
+        failing_result = {
+            "backend": "real",
+            "selection": {"reason": "selected"},
+            "final_specification": {
+                "design_id": "ep0",
+                "parameters": {"rload_ohm": 1.0},
+                "rows": [{"metric": "Power (W)", "measured": "0.02", "requirement": "< 0.015 W", "verdict": "FAIL", "source": "x"}],
+            },
+        }
+        report = summarize_result(
+            request="req", provider_result=_provider_result(), unquantified_notes=(),
+            backend="real", checkpoint="results/ppo_v3_tt_1000_policy.pt", rl_version="v3", runtime_s=1.0,
+            pipeline_argv=["python"], process=_fake_process(0), pipeline_result=failing_result,
+        )
+        text = format_report(report)
+        self.assertIn("Overall verdict: FAIL", text)
+
+
+class GenuineV3CheckpointTests(unittest.TestCase):
+    """Phase 8: genuine v3 checkpoint acceptance / v2 checkpoint rejection /
+    missing checkpoint error -- exercised through the real, unmodified
+    experiments.run_autockt_pipeline.generate_candidates on the synthetic
+    backend (fast, no real SPICE), the same checkpoint-loading code path
+    the wrapper's subprocess call ultimately runs.
+    """
+
+    GENUINE_V3_CHECKPOINT = Path("results/ppo_v3_tt_1000_policy.pt")
+    LEGACY_NO_METADATA_CHECKPOINT = Path("results/ppo_v2_policy.pt")
+
+    def setUp(self):
+        if not self.GENUINE_V3_CHECKPOINT.is_file():
+            self.skipTest(f"{self.GENUINE_V3_CHECKPOINT} not present in this checkout")
+        if not self.LEGACY_NO_METADATA_CHECKPOINT.is_file():
+            self.skipTest(f"{self.LEGACY_NO_METADATA_CHECKPOINT} not present in this checkout")
+
+    def test_genuine_v3_checkpoint_is_accepted(self):
+        from experiments.run_autockt_pipeline import generate_candidates
+        from rl.target_spec import TargetSpec
+
+        candidates = generate_candidates(
+            target=TargetSpec.from_existing_thresholds(), checkpoint_path=self.GENUINE_V3_CHECKPOINT,
+            agent_seed=42, eval_seed=42, episodes=1, horizon=4, backend="synthetic", rl_version="v3",
+        )
+        self.assertEqual(len(candidates), 1)
+
+    def test_legacy_no_metadata_checkpoint_is_rejected_for_v3(self):
+        from experiments.run_autockt_pipeline import generate_candidates
+        from rl.target_spec import TargetSpec
+
+        with self.assertRaises(ValueError) as ctx:
+            generate_candidates(
+                target=TargetSpec.from_existing_thresholds(), checkpoint_path=self.LEGACY_NO_METADATA_CHECKPOINT,
+                agent_seed=42, eval_seed=42, episodes=1, horizon=4, backend="synthetic", rl_version="v3",
+            )
+        self.assertIn("v3 metadata-bearing", str(ctx.exception))
+
+    def test_missing_checkpoint_path_raises_file_not_found(self):
+        from experiments.run_autockt_pipeline import generate_candidates
+        from rl.target_spec import TargetSpec
+
+        with self.assertRaises(FileNotFoundError):
+            generate_candidates(
+                target=TargetSpec.from_existing_thresholds(),
+                checkpoint_path=Path("results/does_not_exist_checkpoint.pt"),
+                agent_seed=42, eval_seed=42, episodes=1, horizon=4, backend="synthetic", rl_version="v3",
+            )
+
+    def test_wrapper_surfaces_a_clear_checkpoint_incompatibility_message(self):
+        # Simulate the subprocess having failed with the real error text
+        # generate_candidates raises for a legacy checkpoint under v3.
+        stderr = (
+            "Traceback (most recent call last):\n"
+            "  ...\n"
+            "ValueError: v3 requires a v3 metadata-bearing policy export\n"
+        )
+        report = summarize_result(
+            request="req", provider_result=_provider_result(), unquantified_notes=(),
+            backend="real", checkpoint=str(self.LEGACY_NO_METADATA_CHECKPOINT), rl_version="v3", runtime_s=1.0,
+            pipeline_argv=["python"], process=_fake_process(1, stderr=stderr), pipeline_result=None,
+        )
+        self.assertIsNotNone(report.checkpoint_error)
+        self.assertIn("v3 requires a v3 metadata-bearing policy export", report.checkpoint_error)
+        text = format_report(report)
+        self.assertIn("incompatible with --rl-version v3", text)
 
 
 if __name__ == "__main__":

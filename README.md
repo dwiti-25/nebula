@@ -704,63 +704,113 @@ pip install anthropic
 | `NEBULA_LLM_PROVIDER` | `anthropic` | `anthropic` (falls back to the deterministic parser automatically on any failure) or `mock` (always deterministic, no network/SDK). |
 | `NEBULA_LLM_API_KEY` | unset | API key for the `anthropic` provider. If unset, the standard Anthropic SDK credential resolution is used; if that also finds nothing, parsing falls back to the deterministic parser. |
 
-### Example command
+### The genuine v3 checkpoint
+
+`results/ppo_v3_tt_1000_policy.pt` (git-tracked) is a real, metadata-bearing
+PPO v3 export: 100 PPO updates / 692 real-SPICE evaluations, `backend=real`,
+seed 101 (see `results/v3_tt_1000_summary.json`). It carries the
+`state_schema="v3"` + full `parameter_grid`/`parameter_names` metadata that
+`experiments/run_autockt_pipeline.py::generate_candidates` requires for
+`--rl-version v3` -- unlike a bare/legacy checkpoint (e.g. an old `--rl-version
+v1` export), which raises `ValueError: v3 requires a v3 metadata-bearing
+policy export` if passed with `--rl-version v3`. This is the same checkpoint
+`experiments/web_ui.py` selects by default for v3 (see its
+`_available_checkpoints()`/`ppo_v3_tt_1000_policy.pt` handling) -- the wrapper
+and the web UI use the same checkpoint and the same underlying pipeline.
+
+To train a new one instead: `experiments/train_autockt.py --rl-version v3
+--save-final-policy <path>` (only `--rl-version v3` attaches the required
+metadata; see `rl/checkpoint.py::export_inference_only`).
+
+### Demo commands
+
+**A. Fast demo** (real SPICE, genuine v3 checkpoint, nominal validation only --
+takes a few minutes):
 
 ```bash
 python -m nebula.llm_wrapper \
-  "Design a low-power PCIe Gen-2 receiver with eye width above 0.4 UI and power below 15 mW." \
-  --backend synthetic --checkpoint results/autockt_mixed_target_confirmation_policy.pt
+  "Design a low-power PCIe Gen-2 receiver with eye width above 0.4 UI, eye height above 0.1 V, and power below 15 mW." \
+  --llm-provider mock --backend real \
+  --checkpoint results/ppo_v3_tt_1000_policy.pt --rl-version v3
+```
+
+This is **not** complete validation -- PVT, HD3, and noise are NOT CLAIMED
+(not executed) in this command's output; it only proves the nominal design
+meets the target under one condition.
+
+**B. Full evidence** (real SPICE, genuine v3 checkpoint, HD3/noise + full
+36-condition TT/SS/FF PVT sweep -- can take an hour or more):
+
+```bash
+python -m nebula.llm_wrapper \
+  "Design a low-power PCIe Gen-2 receiver with eye width above 0.4 UI, eye height above 0.1 V, and power below 15 mW." \
+  --llm-provider mock --backend real \
+  --checkpoint results/ppo_v3_tt_1000_policy.pt --rl-version v3 \
+  --measure-hd3-noise --pvt-condition-set full36
 ```
 
 `--backend synthetic` (the default) is fast and spends no real SPICE time,
 but its metrics come from `rl.synthetic_benchmark`, not ngspice -- the report
-says so explicitly. Pass `--backend real` for actual SPICE-measured results
-(slow: roughly 15-65s per evaluation). Omitting `--checkpoint` uses a
-freshly-initialized, untrained policy (undirected rollout, not a learned
-design search) -- the report flags this too. Run `python -m nebula.llm_wrapper
---help` for the rest of the pass-through options (`--rl-version`, `--episodes`,
-`--horizon`, `--measure-hd3-noise`, `--pvt-condition-set`, `--llm-provider`,
+says so explicitly. Omitting `--checkpoint` uses a freshly-initialized,
+untrained policy (undirected rollout, not a learned design search) -- the
+report flags this too. Run `python -m nebula.llm_wrapper --help` for the rest
+of the pass-through options (`--episodes`, `--horizon`, `--llm-provider`,
 `--output`, `--json`), which map directly onto
 `experiments/run_autockt_pipeline.py`'s own flags.
 
-### Example output
+### Example output (command A, actually executed against real SPICE)
 
 ```
 NEBULA natural-language wrapper -- orchestration/formatting layer only.
 This tool does NOT claim the LLM improves circuit quality; all circuit
 results below come unmodified from experiments/run_autockt_pipeline.py.
 
-Request: Design a low-power PCIe Gen-2 receiver with eye width above 0.4 UI and power below 15 mW.
-Target-parsing provider: mock (fallback: ModuleNotFoundError: No module named 'anthropic')
-Requested target (explicit: dfe_eye_width_ui, ctle_power_w):
-    dfe_locked_phase_eye_height_v       = 0.1
+Request: Design a low-power PCIe Gen-2 receiver with eye width above 0.4 UI, eye height above 0.1 V, and power below 15 mW.
+Target-parsing provider: mock
+Requested target (explicit: dfe_eye_width_ui, dfe_locked_phase_eye_height_v, ctle_power_w):
+  * dfe_locked_phase_eye_height_v       = 0.1
   * dfe_eye_width_ui                    = 0.4
     dfe_min_margin_v                    = 0
   * ctle_power_w                        = 0.015
 
-Backend used: synthetic
-Checkpoint: results/autockt_mixed_target_confirmation_policy.pt
-Runtime: 2.37s
+RL version: v3
+Backend used: real
+Checkpoint: results/ppo_v3_tt_1000_policy.pt
+Runtime: 330.67s
 Pipeline exit code: 0
 
 Selected circuit parameters:
-  rload_ohm       = 2511.89
-  rdeg_ohm        = 446.684
-  ...
+  rload_ohm       = 2457.14
+  rdeg_ohm        = 485.714
+  cdeg_f          = 4.85714e-13
+  itail_a         = 0.00067
+  dfe_tap_v       = 0.0571429
+  mos_width_um    = 10.378
+  mos_length_um   = 0.15
+  mos_multiplier  = 1
 
 Metric                         Measured        Requirement                      Verdict
-Eye width (UI)                 0.5373          > 0.4 UI                         PASS
-Power (W)                      0.0147          0 < power < 0.015 W (15 mW)      PASS
+Eye width (UI)                 0.76            > 0.4 UI                         PASS
+Eye height (V)                 1.545           > 0.1 V                          PASS
+Margin (V)                     0.7281          > 0 V                            PASS
+Power (W)                      0.001206        0 < power < 0.015 W (15 mW)      PASS
+Peaking (dB)                   3.599           3-12 dB, ~1.25-2.5 GHz           PASS
 HD3 (dB)                       n/a             < -30 dB                         NOT CLAIMED
-...
+Input-referred noise (Vrms)    n/a             < 0.0015 Vrms (1.5 mV)           NOT CLAIMED
+PVT (pass/total)                n/a            36-condition TT/SS/FF grid       NOT CLAIMED
 
 PVT status:   NOT CLAIMED
 HD3 status:   NOT CLAIMED
 Noise status: NOT CLAIMED
 
-Warnings:
-  - backend=synthetic: all metrics ... NOT real circuit measurements. Pass --backend real ...
-  - LLM provider unavailable, used deterministic parser fallback instead (...).
+## NEBULA FINAL RESULT
+
+RL version: v3
+Checkpoint: results/ppo_v3_tt_1000_policy.pt
+Backend: real
+Runtime: 330.67s
+Overall verdict: PASS
+Warnings: 4 (see above)
 ```
 
 ### Limitations
@@ -781,6 +831,11 @@ Warnings:
 - **`--backend real` and non-`none` `--pvt-condition-set` values are slow**
   (real ngspice per evaluation; `minimal27`/`full36` PVT sweeps can take
   hours) -- never selected automatically by this wrapper.
+- **`--checkpoint` and `--rl-version` must match the checkpoint's own schema.**
+  A `--rl-version v3` request against a legacy/bare or v1/v2 checkpoint fails
+  fast with a clear error (`checkpoint '<path>' is missing or incompatible
+  with --rl-version v3: ...`) rather than silently falling back to an
+  untrained policy or a mismatched state schema.
 - Every metric, verdict, and NOT CLAIMED status is copied verbatim from
   `experiments/run_autockt_pipeline.py`'s own JSON output; this wrapper adds
   no measurement of its own and cannot report anything the underlying
