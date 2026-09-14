@@ -674,3 +674,114 @@ simulator evaluations, failures, and runtime are the common comparison axes.
 New training runs emit append-only `.events.jsonl` records and can export both
 inference-only and resumable checkpoints. Dashboard plots are rendered through
 Matplotlib as downloadable SVG or PNG rather than browser-drawn approximations.
+
+## Natural-language wrapper (`nebula.llm_wrapper`)
+
+A thin natural-language interface around
+[`experiments/run_autockt_pipeline.py`](experiments/run_autockt_pipeline.py).
+It is **an orchestration/formatting layer, not a circuit designer**: it does
+not improve circuit quality, does not run its own SPICE evaluation, and does
+not select or measure anything itself. It only (1) turns a request into the
+existing `rl.target_spec.TargetSpec` field schema, (2) invokes the existing,
+unmodified pipeline CLI as a subprocess (the same entry point
+`experiments/web_ui.py` already uses, for the same crash-isolation reason),
+and (3) formats that pipeline's own PASS/FAIL/NOT CLAIMED results
+(`analysis/final_specification.py`) as a report.
+
+### Installation
+
+No new dependency is required to run with the deterministic fallback parser.
+For LLM-assisted parsing, install the Anthropic SDK:
+
+```bash
+pip install anthropic
+```
+
+### Environment variables
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NEBULA_LLM_PROVIDER` | `anthropic` | `anthropic` (falls back to the deterministic parser automatically on any failure) or `mock` (always deterministic, no network/SDK). |
+| `NEBULA_LLM_API_KEY` | unset | API key for the `anthropic` provider. If unset, the standard Anthropic SDK credential resolution is used; if that also finds nothing, parsing falls back to the deterministic parser. |
+
+### Example command
+
+```bash
+python -m nebula.llm_wrapper \
+  "Design a low-power PCIe Gen-2 receiver with eye width above 0.4 UI and power below 15 mW." \
+  --backend synthetic --checkpoint results/autockt_mixed_target_confirmation_policy.pt
+```
+
+`--backend synthetic` (the default) is fast and spends no real SPICE time,
+but its metrics come from `rl.synthetic_benchmark`, not ngspice -- the report
+says so explicitly. Pass `--backend real` for actual SPICE-measured results
+(slow: roughly 15-65s per evaluation). Omitting `--checkpoint` uses a
+freshly-initialized, untrained policy (undirected rollout, not a learned
+design search) -- the report flags this too. Run `python -m nebula.llm_wrapper
+--help` for the rest of the pass-through options (`--rl-version`, `--episodes`,
+`--horizon`, `--measure-hd3-noise`, `--pvt-condition-set`, `--llm-provider`,
+`--output`, `--json`), which map directly onto
+`experiments/run_autockt_pipeline.py`'s own flags.
+
+### Example output
+
+```
+NEBULA natural-language wrapper -- orchestration/formatting layer only.
+This tool does NOT claim the LLM improves circuit quality; all circuit
+results below come unmodified from experiments/run_autockt_pipeline.py.
+
+Request: Design a low-power PCIe Gen-2 receiver with eye width above 0.4 UI and power below 15 mW.
+Target-parsing provider: mock (fallback: ModuleNotFoundError: No module named 'anthropic')
+Requested target (explicit: dfe_eye_width_ui, ctle_power_w):
+    dfe_locked_phase_eye_height_v       = 0.1
+  * dfe_eye_width_ui                    = 0.4
+    dfe_min_margin_v                    = 0
+  * ctle_power_w                        = 0.015
+
+Backend used: synthetic
+Checkpoint: results/autockt_mixed_target_confirmation_policy.pt
+Runtime: 2.37s
+Pipeline exit code: 0
+
+Selected circuit parameters:
+  rload_ohm       = 2511.89
+  rdeg_ohm        = 446.684
+  ...
+
+Metric                         Measured        Requirement                      Verdict
+Eye width (UI)                 0.5373          > 0.4 UI                         PASS
+Power (W)                      0.0147          0 < power < 0.015 W (15 mW)      PASS
+HD3 (dB)                       n/a             < -30 dB                         NOT CLAIMED
+...
+
+PVT status:   NOT CLAIMED
+HD3 status:   NOT CLAIMED
+Noise status: NOT CLAIMED
+
+Warnings:
+  - backend=synthetic: all metrics ... NOT real circuit measurements. Pass --backend real ...
+  - LLM provider unavailable, used deterministic parser fallback instead (...).
+```
+
+### Limitations
+
+- **Parsing is best-effort.** The deterministic fallback recognizes a small,
+  explicit set of keyword+number+unit patterns (eye width in UI, eye
+  height/margin in V or mV, power in W or mW). A bare number with no unit
+  (e.g. "power below 15") is deliberately left unparsed rather than guessed.
+  Purely qualitative language ("low power", "robust") is echoed back as a
+  warning, never turned into an invented numeric threshold.
+- **The LLM path can still misparse or over/under-fit the request** -- it is
+  checked only against the same JSON schema, not against engineering intent.
+  Treat `Requested target` in the output as the actual constraint used, and
+  verify it before trusting a run's result.
+- **This wrapper does not improve, tune, or retrain anything.** It performs
+  no PPO training or gradient update; a run with no `--checkpoint` reports
+  an untrained-policy warning rather than a design result.
+- **`--backend real` and non-`none` `--pvt-condition-set` values are slow**
+  (real ngspice per evaluation; `minimal27`/`full36` PVT sweeps can take
+  hours) -- never selected automatically by this wrapper.
+- Every metric, verdict, and NOT CLAIMED status is copied verbatim from
+  `experiments/run_autockt_pipeline.py`'s own JSON output; this wrapper adds
+  no measurement of its own and cannot report anything the underlying
+  pipeline did not itself measure.

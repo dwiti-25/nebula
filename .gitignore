@@ -8,6 +8,7 @@ results/*.jsonl
 results/*.jsonl.*.json
 results/*.csv
 results/web_ui_runs/
+results/llm_wrapper_runs/
 results/qualification_cache/
 # Submission evidence consumed by the v3 dashboard and qualification report.
 !results/v3_tt_1000_events.jsonl
