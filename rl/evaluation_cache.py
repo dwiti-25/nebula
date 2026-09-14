@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 from typing import Callable
+from threading import RLock
+from concurrent.futures import Future
 
 from simulator.config import SimulationConditions
 from simulator.receiver import EvaluationFidelity, ReceiverEvaluation, ReceiverParameters
@@ -76,6 +78,8 @@ class CachedEvaluator:
     evaluator: Evaluator
     stats: EvaluationCacheStats = field(default_factory=EvaluationCacheStats)
     _store: dict = field(default_factory=dict, repr=False)
+    _lock: object = field(default_factory=RLock, repr=False)
+    _pending: dict = field(default_factory=dict, repr=False)
 
     def __call__(
         self,
@@ -85,14 +89,34 @@ class CachedEvaluator:
         **kwargs: object,
     ) -> ReceiverEvaluation:
         key = cache_key(parameters, conditions, fidelity, **kwargs)
-        cached = self._store.get(key)
-        if cached is not None:
-            self.stats.hits += 1
-            return replace(cached, cache_hit=True)
-        self.stats.misses += 1
-        result = self.evaluator(parameters, conditions, fidelity, **kwargs)
-        self._store[key] = result
-        return result
+        with self._lock:
+            cached = self._store.get(key)
+            if cached is not None:
+                self.stats.hits += 1
+                return replace(cached, cache_hit=True)
+            pending = self._pending.get(key)
+            owner = pending is None
+            if owner:
+                pending = self._pending[key] = Future()
+                self.stats.misses += 1
+            else:
+                self.stats.hits += 1
+        if not owner:
+            return replace(pending.result(), cache_hit=True)
+        try:
+            result = self.evaluator(parameters, conditions, fidelity, **kwargs)
+            from simulator.receiver import _evaluation_is_cacheable
+            with self._lock:
+                if _evaluation_is_cacheable(result):
+                    self._store[key] = result
+                self._pending.pop(key)
+                pending.set_result(result)
+            return result
+        except BaseException as error:
+            with self._lock:
+                self._pending.pop(key, None)
+                pending.set_exception(error)
+            raise
 
     def __len__(self) -> int:
         return len(self._store)

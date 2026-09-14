@@ -33,12 +33,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 from simulator.config import SimulationConditions
 from simulator.receiver import EvaluationFidelity, ReceiverParameters, evaluate_pvt_grid
 
 from analysis.design_catalog import FeasibleDesign, rank_by_measured_trade_offs
+from analysis.target_assessment import TargetAssessment, assess_target
+from rl.target_spec import TargetSpec
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,9 @@ class PVTPointResult:
     temperature_c: float
     success: bool
     failed_stage: Optional[str]
+    simulator_success: Optional[bool] = None
+    metrics: Optional[dict[str, float]] = None
+    target_assessment: Optional[TargetAssessment] = None
 
 
 @dataclass(frozen=True)
@@ -76,21 +81,30 @@ def summarize_pvt_results(design_id: str, points: list[PVTPointResult]) -> PVTRo
     )
 
 
-def load_pvt_results_from_jsonl(design_id: str, path: str | Path) -> PVTRobustnessResult:
+def load_pvt_results_from_jsonl(
+    design_id: str, path: str | Path, *, target: Optional[TargetSpec] = None,
+) -> PVTRobustnessResult:
     """Summarizes an ALREADY-COMPUTED PVT sweep (e.g.
     results/design_a_pvt_minimal27.jsonl, written by experiments/pvt_sweep.py)
     -- no new SPICE. This is how this module is demonstrated below.
     """
 
     rows = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
-    points = [
-        PVTPointResult(
-            process_corner=row["process_corner"], supply_v=row["supply_v"],
-            temperature_c=row["temperature_c"], success=row["success"],
-            failed_stage=row.get("failed_stage"),
+    points = []
+    for row in rows:
+        metrics = dict(row.get("metrics") or {})
+        simulator_success = bool(row["success"])
+        assessment = (
+            assess_target(metrics, target, simulator_success=simulator_success)
+            if target is not None else None
         )
-        for row in rows
-    ]
+        points.append(PVTPointResult(
+            process_corner=row["process_corner"], supply_v=row["supply_v"],
+            temperature_c=row["temperature_c"],
+            success=assessment.passed if assessment is not None else simulator_success,
+            failed_stage=row.get("failed_stage"), simulator_success=simulator_success,
+            metrics=metrics, target_assessment=assessment,
+        ))
     return summarize_pvt_results(design_id, points)
 
 
@@ -99,6 +113,8 @@ def run_pvt_evaluation(
     conditions: tuple[SimulationConditions, ...],
     *,
     fidelity: EvaluationFidelity = EvaluationFidelity.FINAL,
+    target: Optional[TargetSpec] = None,
+    evaluator_kwargs: Mapping[str, Any] | None = None,
 ) -> PVTRobustnessResult:
     """Actually spends real SPICE: runs the EXISTING, unmodified
     evaluate_pvt_grid for one candidate design against the given condition
@@ -107,15 +123,24 @@ def run_pvt_evaluation(
     """
 
     parameters = ReceiverParameters(**design.parameters)
-    evaluations = evaluate_pvt_grid(parameters, conditions=conditions, fidelity=fidelity)
-    points = [
-        PVTPointResult(
-            process_corner=condition.process_corner.value, supply_v=condition.supply_v,
-            temperature_c=condition.temperature_c, success=evaluation.success,
-            failed_stage=evaluation.failed_stage,
+    evaluations = evaluate_pvt_grid(
+        parameters, conditions=conditions, fidelity=fidelity,
+        **dict(evaluator_kwargs or {}),
+    )
+    points = []
+    for condition, evaluation in zip(conditions, evaluations):
+        metrics = dict(evaluation.metrics)
+        assessment = (
+            assess_target(metrics, target, simulator_success=evaluation.success)
+            if target is not None else None
         )
-        for condition, evaluation in zip(conditions, evaluations)
-    ]
+        points.append(PVTPointResult(
+            process_corner=condition.process_corner.value, supply_v=condition.supply_v,
+            temperature_c=condition.temperature_c,
+            success=assessment.passed if assessment is not None else evaluation.success,
+            failed_stage=evaluation.failed_stage, simulator_success=evaluation.success,
+            metrics=metrics, target_assessment=assessment,
+        ))
     return summarize_pvt_results(design.design_id, points)
 
 
@@ -131,16 +156,16 @@ def rank_by_robustness(results: list[PVTRobustnessResult]) -> list[PVTRobustness
 def select_final_designs(
     results: list[PVTRobustnessResult], *, minimum_pass_rate: float = 1.0, top_n: int = 1,
 ) -> list[PVTRobustnessResult]:
-    """Selects up to `top_n` designs meeting `minimum_pass_rate`. If none
-    meet the threshold, returns the top_n most-robust candidates anyway
-    (ranked, not silently empty) -- callers decide whether to accept a
-    below-threshold result; this function does not hide that no candidate
-    met the bar.
+    """Select up to ``top_n`` qualified designs, failing closed.
+
+    A below-threshold design is never returned as a final selection. Callers
+    may display ``rank_by_robustness(results)[0]`` separately as the best
+    available non-qualifying design.
     """
 
     ranked = rank_by_robustness(results)
     meeting_bar = [r for r in ranked if r.pass_rate >= minimum_pass_rate]
-    return (meeting_bar or ranked)[:top_n]
+    return meeting_bar[:top_n]
 
 
 # [NEBULA ADAPTATION] documented, non-arbitrary selection priority (not a
@@ -152,7 +177,7 @@ def select_final_designs(
 # (4) secondary trade-off preference among any PVT ties, via the ORIGINAL
 # design's own measured metrics (analysis.design_catalog.
 # rank_by_measured_trade_offs) -- never applied before priorities 1-3.
-TRADE_OFF_PREFERENCES = ("most_robust", "lowest_power", "strongest_eye_height", "widest_eye", "largest_margin", "balanced")
+TRADE_OFF_PREFERENCES = ("most_robust", "lowest_power", "strongest_eye_height", "widest_eye", "largest_margin", "balanced", "lowest_partial_mos_area", "lowest_noise")
 
 
 def select_with_trade_off_preference(
@@ -180,7 +205,11 @@ def select_with_trade_off_preference(
     if not pvt_results:
         return None
 
-    ranked = rank_by_robustness(pvt_results)
+    ranked = rank_by_robustness([
+        result for result in pvt_results if result.pass_rate >= minimum_pass_rate
+    ])
+    if not ranked:
+        return None
     if preference == "most_robust":
         return ranked[0]
 

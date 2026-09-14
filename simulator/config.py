@@ -66,7 +66,10 @@ class Sky130Config:
         candidates: list[Path] = []
         requested = self.model_library or os.environ.get(SKY130_MODEL_ENV)
         if requested:
-            candidates.append(Path(requested).expanduser())
+            path = Path(requested).expanduser()
+            if not path.is_file():
+                raise FileNotFoundError(f"SKY130 model library does not exist: {path}")
+            return path.resolve()
         home = Path.home()
         pdk_root = os.environ.get("PDK_ROOT")
         if pdk_root:
@@ -95,3 +98,7 @@ PVT_GRID = tuple(
 )
 
 OUTPUT_LOAD_GRID_F = (10e-15, 20e-15, 50e-15)
+
+# Agreed submission scope. PVT_GRID remains available for legacy reproduction.
+QUALIFICATION_PVT_GRID = tuple(c for c in PVT_GRID if c.process_corner in
+                               (ProcessCorner.TT, ProcessCorner.SS, ProcessCorner.FF))

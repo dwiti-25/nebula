@@ -61,6 +61,14 @@ class ValidateRequestTests(unittest.TestCase):
         problems = web_ui._validate_request(self._base(backend="real", checkpoint="results/does_not_exist.pt"))
         self.assertTrue(any("not found" in p for p in problems))
 
+    def test_packaged_checkpoint_is_valid_without_loose_result_file(self):
+        checkpoint = "results/autockt_mixed_target_confirmation_policy.pt"
+        with patch.object(Path, "is_file", return_value=False), patch(
+            "experiments.web_ui.packaged_file_exists", return_value=True,
+        ):
+            problems = web_ui._validate_request(self._base(backend="real", checkpoint=checkpoint))
+        self.assertEqual(problems, [])
+
     def test_checkpoint_path_escaping_the_project_is_rejected(self):
         problems = web_ui._validate_request(self._base(backend="real", checkpoint="../../etc/passwd"))
         self.assertTrue(any("not found" in p for p in problems))
@@ -74,11 +82,27 @@ class ValidateRequestTests(unittest.TestCase):
         self.assertTrue(any("episodes" in p for p in problems))
 
     def test_bad_pvt_condition_set_is_rejected(self):
-        problems = web_ui._validate_request(self._base(pvt_condition_set="full60"))
+        problems = web_ui._validate_request(self._base(pvt_condition_set="invalid"))
         self.assertTrue(any("pvt_condition_set" in p for p in problems))
+
+    def test_unknown_channel_is_rejected(self):
+        problems = web_ui._validate_request(self._base(channel_id="not-a-channel"))
+        self.assertTrue(any("channel_id" in p for p in problems))
 
 
 class BuildArgvTests(unittest.TestCase):
+    def test_reference_channel_adds_path_and_qualified_port_map(self):
+        argv = web_ui._build_argv(
+            {"target_mode": "trivial", "backend": "synthetic", "episodes": 1, "horizon": 1,
+             "pvt_condition_set": "none", "trade_off_preference": "most_robust",
+             "channel_id": "ieee802_reference"},
+            output_path=Path("/tmp/x.json"), schematic_path=Path("/tmp/x.spice"),
+        )
+        channel_index = argv.index("--channel")
+        ports_index = argv.index("--channel-ports")
+        self.assertEqual(argv[channel_index + 1], "channels/ieee802_ibm_20db_thru.s4p")
+        self.assertEqual(argv[ports_index + 1:ports_index + 5], ["1", "3", "2", "4"])
+
     def test_trivial_preset_uses_target_mode_flag(self):
         argv = web_ui._build_argv(
             {"target_mode": "trivial", "backend": "synthetic", "episodes": 3, "horizon": 4,
@@ -201,6 +225,14 @@ class CliArgsTests(unittest.TestCase):
         self.assertEqual(args.host, "0.0.0.0")
         self.assertEqual(args.port, 9999)
 
+    def test_direct_script_entry_point_can_import_sibling_packages(self):
+        proc = web_ui.subprocess.run(
+            [web_ui.sys.executable, str(Path(web_ui.__file__).resolve()), "--help"],
+            cwd=web_ui.PROJECT_ROOT, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("NEBULA local UI server", proc.stdout)
+
 
 class ServerStartupAndReuseTests(unittest.TestCase):
     def test_build_server_binds_the_requested_host_and_port(self):
@@ -270,6 +302,11 @@ class ManualTargetEntryUiIntactTests(unittest.TestCase):
     def test_run_button_still_calls_the_existing_pipeline_api(self):
         self.assertIn("'/api/run'", web_ui.INDEX_HTML)
         self.assertIn("runBtn", web_ui.INDEX_HTML)
+
+    def test_multiple_evidence_graphs_are_wired_to_the_dashboard_endpoint(self):
+        self.assertIn("'/api/evidence'", web_ui.INDEX_HTML)
+        self.assertIn("renderChart", web_ui.INDEX_HTML)
+        self.assertIn("chartGrid", web_ui.INDEX_HTML)
 
 
 class SubprocessTimeoutTests(unittest.TestCase):
@@ -563,6 +600,21 @@ class ExecuteRunProgressIntegrationTests(unittest.TestCase):
         # The interleaved non-JSON line must not have broken anything.
         self.assertIn("unrelated stderr-ish stdout noise", payload["stdout_tail"])
 
+    def test_full_pvt_timeout_exceeds_a_measured_single_sweep(self):
+        timeout_s = web_ui._estimate_timeout_s({"pvt_condition_set": "minimal27", "episodes": 1})
+        self.assertGreater(timeout_s, 138.4 * 60)
+
+    def test_full_pvt_timeout_scales_with_possible_candidates(self):
+        one = web_ui._estimate_timeout_s({"pvt_condition_set": "minimal27", "episodes": 1})
+        three = web_ui._estimate_timeout_s({"pvt_condition_set": "minimal27", "episodes": 3})
+        self.assertGreater(three, one)
+
+    def test_non_full_pvt_keeps_bounded_default(self):
+        self.assertEqual(
+            web_ui._estimate_timeout_s({"pvt_condition_set": "smoke", "episodes": 99}),
+            web_ui.RUN_TIMEOUT_S,
+        )
+
 
 class PvtOptionsMatchPipelineTests(unittest.TestCase):
     """FINAL AUDIT gap D: web_ui.py deliberately keeps its own plain-string
@@ -667,6 +719,12 @@ class HttpIntegrationTests(unittest.TestCase):
         status, data = self._get("/api/checkpoints")
         self.assertEqual(status, 200)
         self.assertIsInstance(data["checkpoints"], list)
+
+    def test_evidence_endpoint_returns_multiple_graphs_and_provenance(self):
+        status, data = self._get("/api/evidence")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(data["charts"]), 6)
+        self.assertTrue(data["sources"])
 
     def test_invalid_request_returns_400_with_problems(self):
         status, data = self._post("/api/run", {"target_mode": "bogus"})

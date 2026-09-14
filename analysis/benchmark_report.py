@@ -194,11 +194,26 @@ CONCLUSION = (
 
 
 def _method_summary_dict(m: MethodSummary) -> dict:
+    # Prefer independently recomputed raw-metric evidence. Historical PPO
+    # logs omitted raw metrics, but these target-filtered rows were natively
+    # evaluated against this exact comparison target, so their logged
+    # target outcome is usable with a clearly weaker evidence grade.
+    if m.uniform_success_rate is not None:
+        reported_strict_rate = m.uniform_success_rate
+        evidence_grade = "raw_metrics_recomputed"
+    elif m.method == "ppo" and "target-filtered subset" in m.source_file:
+        reported_strict_rate = m.native_success_rate
+        evidence_grade = "logged_same_target_outcome_raw_metrics_unavailable"
+    else:
+        reported_strict_rate = None
+        evidence_grade = "unavailable"
     return {
         "source_file": m.source_file,
         "n_evaluations": m.n_evaluations,
         "native_success_rate": m.native_success_rate,
         "uniform_success_rate": m.uniform_success_rate,
+        "reported_strict_success_rate": reported_strict_rate,
+        "strict_success_evidence_grade": evidence_grade,
         "uniform_evaluations_to_first_success": m.uniform_evaluations_to_first_success,
         "best_uniform_reward": m.best_uniform_reward,
         "wall_clock_total_s": m.wall_clock_total_s,
@@ -227,6 +242,7 @@ def build_benchmark_report() -> dict:
         "no_warm_start_headtohead_sec20": no_warm_start_headtohead_trial(),
     }
     return {
+        "schema_version": 2,
         "trials": {trial_id: _trial_dict(t) for trial_id, t in trials.items()},
         "conclusion": CONCLUSION,
     }

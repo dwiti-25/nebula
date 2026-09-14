@@ -12,8 +12,9 @@ from typing import Mapping
 
 
 _SPICE_INCLUDE_RE = re.compile(
-    r"(?im)^\s*\.include\s+(?:\"([^\"]+)\"|'([^']+)'|([^\s;]+))"
+    r"(?im)^\s*\.inc(?:lude)?\s+(?:\"([^\"]+)\"|'([^']+)'|([^\s;]+))"
 )
+_SPICE_LIB_RE = re.compile(r'''(?im)^\s*\.lib\s+(?:"([^"]+)"|'([^']+)'|([^\s;]+))[ \t]+[^\s;]+''')
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -48,7 +49,7 @@ def spice_dependency_manifest(path: str | Path) -> dict[str, str]:
         text = current.read_text(encoding="utf-8", errors="replace")
         relative = os.path.relpath(current, root.parent).replace("\\", "/")
         dependencies[relative] = sha256_text(text)
-        for match in _SPICE_INCLUDE_RE.finditer(text):
+        for match in (*_SPICE_INCLUDE_RE.finditer(text), *_SPICE_LIB_RE.finditer(text)):
             value = next(group for group in match.groups() if group is not None)
             if "{" in value or "$" in value:
                 raise ValueError(f"dynamic SPICE include cannot be fingerprinted: {value}")

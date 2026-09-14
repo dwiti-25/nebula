@@ -1,5 +1,9 @@
 # Nebula
 
+**PPO v3 and run graphs:** see [the current training and integration guide](docs/V3_TRAINING_AND_RUN_GRAPHS.md).
+The UI can train eight-parameter PPO checkpoints and display recorded run graphs
+and plots. v1/v2 remain separate; Manim is not required.
+
 Nebula is an automated analog-design framework for a PCIe Gen-2 receiver
 equalizer. This branch integrates the parameterized SKY130 CTLE with a robust,
 RL-independent Python-to-ngspice evaluation pipeline.
@@ -249,11 +253,19 @@ synthetic channel:
 python -m experiments.evaluate_receiver --fidelity training
 ```
 
-Use a real four-port channel when one is available:
+Use the integrated public lossy reference channel:
 
 ```powershell
-python -m experiments.evaluate_receiver --channel C:\channels\board.s4p --fidelity candidate
+python -m experiments.evaluate_receiver `
+  --channel channels\ieee802_ibm_20db_thru.s4p `
+  --channel-ports 1 3 2 4 --fidelity training
 ```
+
+This IEEE/IBM experimental backplane THRU model is 50 ohm, spans 10 MHz to
+20 GHz, and loses 6.31 dB at the PCIe Gen-2 2.5 GHz Nyquist frequency. It is a
+realistic public development/training reference, not PCI-SIG compliance
+evidence. Source, checksum, port-map basis, qualification metrics and the
+publisher's limitations are in `channels/ieee802_ibm_20db_thru.json`.
 
 Port order is explicit and one-based (`TXP TXN RXP RXN`).  The default is
 `1 2 3 4`; override it only from the channel vendor's documentation:
@@ -567,6 +579,12 @@ authority for every accepted action; this policy does not change the RL action b
 The bundled synthetic channel has zero phase and exists only to test software
 deterministically. It must not be used as final PCIe channel evidence.
 
+The bundled IEEE/IBM channel passes the project's automated 50-ohm, bandwidth,
+passivity, causality and phase-unwrapping preflight and has also completed a
+real ngspice TRAINING-fidelity CTLE+channel+behavioral-DFE evaluation. Because
+it comes from an IEEE 802.3 backplane study rather than PCI-SIG, results using
+it must be described as reference-channel results, not PCIe compliance.
+
 ### Remaining qualification before RL training
 
 The software suite covers analytic 0/0.3/0.7/0.99/1/5/20-UI delays,
@@ -583,8 +601,9 @@ a remaining performance enhancement, not a reward-correctness prerequisite.
 
 ## Project boundaries
 
-This integration now provides the adapter contract but deliberately stops
-before selecting or training a reinforcement-learning algorithm. Full Stage 2 work still
+This integration provides both the preserved PPO v1 baseline and the opt-in
+PPO v2 configuration. Select them with `--rl-version v1|v2` in the pipeline
+or training CLI, or with the version selector in the browser UI. Full Stage 2 work still
 includes a physical bias/tail source, sampler and DFE, MOS sizing groups,
 parasitics, and layout-grounded area/power. The complete decision and
 deferred-work ledger is in `docs/stage1-decisions.md`.
@@ -627,3 +646,31 @@ module they depend on) plus their tests.
 
 See `docs/FINAL_TECHNICAL_AUDIT.md` for the full narrative interpretation
 of these results (what can and cannot be honestly claimed from them).
+
+## Phase 7 — target-correct qualification and evidence dashboard
+
+The local UI now includes seven source-traceable performance graphs and can
+read both historical evidence and the trained PPO checkpoint directly from
+the tracked Phase-2 ZIP on a clean checkout. Candidate filtering and PVT
+selection use strict, independent per-metric target checks and fail closed;
+AutoCkt's intentionally tolerant terminal reward is retained for learning but
+is no longer treated as an engineering qualification predicate.
+
+Run the UI with:
+
+```text
+python experiments/web_ui.py --port 8001
+```
+
+See [`docs/PHASE7_COMPLETION_REPORT.md`](docs/PHASE7_COMPLETION_REPORT.md)
+for the preserved implementation order, performance-display semantics,
+reviewed Stage-2 deferrals, and remaining qualification work. The
+research-backed Matplotlib migration and performance-plot roadmap is in
+[`docs/PERFORMANCE_PLOT_IMPLEMENTATION_PLAN.md`](docs/PERFORMANCE_PLOT_IMPLEMENTATION_PLAN.md).
+
+PPO v1 and v2 are deliberately reported separately. Their reward scales are
+not directly comparable, so strict target success, normalized target margins,
+simulator evaluations, failures, and runtime are the common comparison axes.
+New training runs emit append-only `.events.jsonl` records and can export both
+inference-only and resumable checkpoints. Dashboard plots are rendered through
+Matplotlib as downloadable SVG or PNG rather than browser-drawn approximations.

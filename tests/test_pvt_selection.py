@@ -108,6 +108,33 @@ class RunPvtEvaluationTests(unittest.TestCase):
         self.assertEqual(len(result.worst_case_conditions), 1)
         self.assertEqual(result.worst_case_conditions[0].process_corner, "ff")
 
+    def test_requested_target_is_checked_at_every_corner(self):
+        from rl.target_spec import TargetSpec
+
+        design = FeasibleDesign(
+            design_id="test_design", source_file="f", source_description="d",
+            parameters={"rload_ohm": 1000.0, "rdeg_ohm": 1000.0, "cdeg_f": 5e-13,
+                        "itail_a": 1e-4, "dfe_tap_v": 0.0},
+            metrics={}, native_reward=10.0, native_reward_scale="autockt_reward",
+        )
+        conditions = (SimulationConditions(ProcessCorner.TT, 27.0, 1.8),)
+        target = TargetSpec(0.8, 0.6, 0.35, 0.015)
+        below_target = {
+            "dfe_locked_phase_eye_height_v": 0.79, "dfe_eye_width_ui": 0.6,
+            "dfe_min_margin_v": 0.35, "ctle_power_w": 0.001,
+        }
+
+        def fake_grid(parameters, *, conditions, fidelity):
+            return tuple(ReceiverEvaluation(
+                True, parameters, condition, fidelity, (), below_target, None, 0.0, "id", {},
+            ) for condition in conditions)
+
+        with patch("analysis.pvt_selection.evaluate_pvt_grid", side_effect=fake_grid):
+            result = run_pvt_evaluation(design, conditions, target=target)
+        self.assertEqual(result.n_passing, 0)
+        self.assertTrue(result.points[0].simulator_success)
+        self.assertFalse(result.points[0].target_assessment.passed)
+
 
 class RankAndSelectTests(unittest.TestCase):
     def test_rank_by_robustness_orders_by_pass_rate_descending(self):
@@ -128,14 +155,13 @@ class RankAndSelectTests(unittest.TestCase):
         selected = select_final_designs([partial, full], minimum_pass_rate=1.0, top_n=1)
         self.assertEqual(selected[0].design_id, "full")
 
-    def test_select_final_designs_does_not_hide_when_no_candidate_meets_the_bar(self):
+    def test_select_final_designs_fails_closed_when_no_candidate_meets_the_bar(self):
         partial = summarize_pvt_results("partial", [
             PVTPointResult("tt", 1.8, 27.0, True, None),
             PVTPointResult("ff", 1.71, 125.0, False, "transient"),
         ])
         selected = select_final_designs([partial], minimum_pass_rate=1.0, top_n=1)
-        self.assertEqual(len(selected), 1)  # still returns the best available, not empty
-        self.assertLess(selected[0].pass_rate, 1.0)
+        self.assertEqual(selected, [])
 
 
 class SelectWithTradeOffPreferenceTests(unittest.TestCase):
@@ -187,6 +213,15 @@ class SelectWithTradeOffPreferenceTests(unittest.TestCase):
 
     def test_empty_results_returns_none(self):
         self.assertIsNone(select_with_trade_off_preference([], [], preference="most_robust"))
+
+    def test_trade_off_selection_fails_closed_when_no_result_meets_minimum(self):
+        partial = summarize_pvt_results("partial", [
+            PVTPointResult("tt", 1.8, 27.0, True, None),
+            PVTPointResult("ff", 1.71, 125.0, False, "transient"),
+        ])
+        self.assertIsNone(select_with_trade_off_preference(
+            [partial], [self._design("partial")], minimum_pass_rate=1.0,
+        ))
 
     def test_unknown_preference_raises(self):
         with self.assertRaises(ValueError):

@@ -110,6 +110,7 @@ def build_parameter_grids(
     points_per_parameter: int = DEFAULT_GRID_POINTS,
     *,
     spacing: str = DEFAULT_GRID_SPACING,
+    version: str = "v1",
 ) -> dict[str, ParameterGrid]:
     """[AUTOCKT-REPLICATED] `np.arange(lower, upper, step)` per parameter
     when `spacing="linear"` (the default -- byte-for-byte the original,
@@ -134,9 +135,17 @@ def build_parameter_grids(
     if spacing not in GRID_SPACINGS:
         raise ValueError(f"spacing must be one of {GRID_SPACINGS}, got {spacing!r}")
 
+    from simulator.design_schema import parameter_bounds
+    if points_per_parameter < 2:
+        raise ValueError("grid requires at least two points")
     grids: dict[str, ParameterGrid] = {}
-    for name, lower, upper, scale in ACTION_BOUNDS:
-        if spacing == "log" and scale == "log":
+    for name, lower, upper, scale in parameter_bounds(version):
+        if scale == "integer":
+            values = tuple(range(int(lower), int(upper) + 1))
+        elif name.startswith("mos_"):
+            # SKY130 dimensions in microns, snapped to a 1 nm sizing grid.
+            values = tuple(sorted(set(round(float(v), 3) for v in np.linspace(lower, upper, points_per_parameter)) | {10.0 if name == "mos_width_um" else 0.15}))
+        elif spacing == "log" and scale == "log":
             values = tuple(float(v) for v in np.geomspace(lower, upper, points_per_parameter))
         else:
             step = (upper - lower) / points_per_parameter
@@ -182,4 +191,14 @@ VERIFIED_INITIAL_PARAMETERS: Mapping[str, float] = {
 def verified_initial_indices(grids: Mapping[str, ParameterGrid]) -> tuple[int, ...]:
     """Nearest-grid-index encoding of VERIFIED_INITIAL_PARAMETERS."""
 
-    return tuple(grids[name].nearest_index(VERIFIED_INITIAL_PARAMETERS[name]) for name in PARAMETER_NAMES)
+    from simulator.receiver import ReceiverParameters
+    defaults = ReceiverParameters()
+    return tuple(grids[name].nearest_index(VERIFIED_INITIAL_PARAMETERS.get(name, getattr(defaults, name))) for name in grids)
+
+
+def quantize_parameters(parameters, grids):
+    """Use identical physical grids for PPO, Random Search and CEM comparisons."""
+    from dataclasses import replace
+    return replace(parameters, **{name: int(grid.value_at(grid.nearest_index(getattr(parameters, name))))
+        if name == "mos_multiplier" else grid.value_at(grid.nearest_index(getattr(parameters, name)))
+        for name, grid in grids.items()})

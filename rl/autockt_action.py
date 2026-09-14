@@ -46,14 +46,14 @@ def apply_action(
     against, never silently substituted for the AutoCkt-replicated default.
     """
 
-    if len(indices) != len(PARAMETER_NAMES):
-        raise ValueError(f"expected {len(PARAMETER_NAMES)} indices, got {len(indices)}")
-    if len(choices) != len(PARAMETER_NAMES):
-        raise ValueError(f"expected {len(PARAMETER_NAMES)} choices, got {len(choices)}")
+    if len(indices) != len(grids):
+        raise ValueError(f"expected {len(grids)} indices, got {len(indices)}")
+    if len(choices) != len(grids):
+        raise ValueError(f"expected {len(grids)} choices, got {len(choices)}")
     if len(deltas) != 3:
         raise ValueError("deltas must have exactly 3 entries (one per Discrete(3) choice)")
     new_indices = []
-    for name, index, choice in zip(PARAMETER_NAMES, indices, choices):
+    for name, index, choice in zip(grids, indices, choices):
         if choice not in (0, 1, 2):
             raise ValueError("each choice must be 0, 1, or 2 (an index into deltas)")
         delta = deltas[choice]
@@ -75,10 +75,12 @@ def indices_to_normalized_action(
     read, never changed.
     """
 
-    if len(indices) != len(PARAMETER_NAMES):
-        raise ValueError(f"expected {len(PARAMETER_NAMES)} indices, got {len(indices)}")
+    if len(indices) != len(grids):
+        raise ValueError(f"expected {len(grids)} indices, got {len(indices)}")
     action = []
-    for (name, lower, upper, scale), index in zip(ACTION_BOUNDS, indices):
+    from simulator.design_schema import parameter_bounds
+    bounds = parameter_bounds("v3" if "mos_width_um" in grids else "v1")
+    for (name, lower, upper, scale), index in zip(bounds, indices):
         physical = grids[name].value_at(index)
         if scale == "log":
             fraction = math.log(physical / lower) / math.log(upper / lower)

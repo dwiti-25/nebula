@@ -85,13 +85,13 @@ def main() -> int:
     parser.add_argument("--elite", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
-        "--init-mean", type=float, nargs=5, default=list(DEFAULT_INIT_MEAN),
+        "--init-mean", type=float, nargs="+", default=None,
         help="[NEBULA ADAPTATION] initial Gaussian mean over the 5 normalized "
         "action dimensions. Default matches the original warm-started values "
         "(unchanged behavior); pass '0 0 0 0 0' for an unbiased, centered start.",
     )
     parser.add_argument(
-        "--init-std", type=float, nargs=5, default=[DEFAULT_INIT_STD] * 5,
+        "--init-std", type=float, nargs="+", default=None,
         help="[NEBULA ADAPTATION] initial per-dimension std. Default matches the "
         "original narrow value (0.15); pass e.g. '0.577 ...' (Uniform(-1,1)'s own "
         "std, 2/sqrt(12)) for first-generation coverage comparable to uniform sampling.",
@@ -116,6 +116,13 @@ def main() -> int:
         type=Path,
         default=Path("results/cem_training.jsonl"),
     )
+    from rl.runtime_contract import add_channel_arguments, channel_kwargs
+    from simulator.design_schema import parameter_names
+    parser.add_argument("--rl-version", choices=("v1", "v2", "v3"), default="v1")
+    parser.add_argument("--backend", choices=("real", "synthetic"), default="real")
+    add_channel_arguments(parser)
+    parser.add_argument("--grid-points", type=int, default=21)
+    parser.add_argument("--grid-spacing", choices=("linear", "log"), default="linear")
     args = parser.parse_args()
 
     if args.elite > args.population:
@@ -124,10 +131,24 @@ def main() -> int:
     target = TargetSpec.from_hard_target() if args.target == "hard" else TargetSpec.from_existing_thresholds()
 
     rng = random.Random(args.seed)
-    env = ReceiverRLAdapter(seed=args.seed)
+    from simulator.rl_adapter import RLBudget
+    from simulator.receiver import evaluate_receiver
+    from rl.synthetic_v3 import synthetic_evaluate_receiver_v3
+    from rl.synthetic_benchmark import synthetic_evaluate_receiver
+    n_parameters = len(parameter_names(args.rl_version))
+    from rl.parameter_grid import build_parameter_grids
+    grids = build_parameter_grids(args.grid_points, spacing=args.grid_spacing, version=args.rl_version) if args.rl_version == "v3" else None
+    evaluator = evaluate_receiver if args.backend == "real" else (synthetic_evaluate_receiver_v3 if args.rl_version == "v3" else synthetic_evaluate_receiver)
+    env = ReceiverRLAdapter(seed=args.seed, version=args.rl_version, evaluator=evaluator,
+        budget=RLBudget(args.iterations * args.population), evaluator_kwargs=channel_kwargs(args), grids=grids)
 
-    mean = list(args.init_mean)
-    std = list(args.init_std)
+    mean = list(args.init_mean if args.init_mean is not None else DEFAULT_INIT_MEAN + ((-0.807, -1.0, -1.0) if args.rl_version == "v3" else ()))
+    std = list(args.init_std if args.init_std is not None else [DEFAULT_INIT_STD] * n_parameters)
+    if len(mean) != n_parameters or len(std) != n_parameters or any(v <= 0 for v in std):
+        raise ValueError("CEM mean/std must match the selected parameter count and std must be positive")
+    from analysis.run_graph import RunGraph, ACTIVE
+    graph = RunGraph({"backend": args.backend, "algorithm": "cem", "version": args.rl_version, "channel": str(args.channel)}, args.output.with_suffix(".graph.json"))
+    token = ACTIVE.set(graph)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -143,7 +164,7 @@ def main() -> int:
             for _ in range(args.population):
                 action = tuple(
                     max(-1.0, min(1.0, rng.gauss(mean[i], std[i])))
-                    for i in range(5)
+                    for i in range(n_parameters)
                 )
 
                 start_time = time.perf_counter()
@@ -153,20 +174,27 @@ def main() -> int:
 
                 metrics = metrics_from_observation(step.observation)
                 failure_stage = step.info.get("failure_stage")
-                if args.fitness == "graded":
+                if args.rl_version == "v3":
+                    from rl.autockt_v3 import reward_v3
+                    metrics = dict(step.info["raw_metrics"])
+                    p = step.info["parameters"]
+                    metrics["partial_mos_channel_area_um2"] = 2 * p["mos_width_um"] * p["mos_length_um"] * p["mos_multiplier"]
+                    fitness_value = reward_v3(metrics, target, success=failure_stage is None, failure_stage=failure_stage).total
+                elif args.fitness == "graded":
                     fitness_value = graded_cem_fitness(metrics, target, failure_stage)
                 else:
                     fitness_value = step.reward
                 candidates.append((fitness_value, action))
 
-                if step.reward > best_reward:
-                    best_reward = step.reward
+                reported_reward = fitness_value if args.rl_version == "v3" else step.reward
+                if reported_reward > best_reward:
+                    best_reward = reported_reward
                     best_action = action
 
                 row = {
                     "iteration": iteration + 1,
                     "evaluation": evaluation_number,
-                    "reward": step.reward,
+                    "reward": reported_reward,
                     "action": action,
                     "success": step.info.get("failure_stage") is None
                     and step.reward > -100.0,
@@ -185,7 +213,7 @@ def main() -> int:
                     # possible from the logged output, which it previously
                     # was not.
                     "metrics": metrics,
-                    "fitness_kind": args.fitness,
+                    "fitness_kind": "reward_v3" if args.rl_version == "v3" else args.fitness,
                     "fitness_value": fitness_value,
                 }
 
@@ -199,7 +227,7 @@ def main() -> int:
             candidates.sort(key=lambda item: item[0], reverse=True)
             elites = candidates[: args.elite]
 
-            for i in range(5):
+            for i in range(n_parameters):
                 values = [action[i] for _, action in elites]
                 mean[i] = sum(values) / len(values)
 
@@ -237,6 +265,8 @@ def main() -> int:
         )
     )
 
+    graph.finish({"algorithm": "cem", "best_reward": best_reward, "best_action": best_action})
+    ACTIVE.reset(token)
     return 0
 
 

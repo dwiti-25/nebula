@@ -208,8 +208,12 @@ def load_s4p(path: str | Path, tx_ports: tuple[int, int] = (1, 2), rx_ports: tup
         values = tokens[row * width:(row + 1) * width]
         frequency[row] = float(values[0]) * _FREQUENCY_SCALE[unit]
         offset = 1
-        for source_port in range(4):
-            for destination_port in range(4):
+        # Touchstone full-matrix data is ordered one destination row at a
+        # time: S11, S12, ... S14, S21, ... S44.  Keeping the loops in that
+        # order matters for asymmetric measured channels; reciprocal synthetic
+        # fixtures can otherwise hide an accidental matrix transpose.
+        for destination_port in range(4):
+            for source_port in range(4):
                 matrix[row, destination_port, source_port] = _complex(
                     float(values[offset]), float(values[offset + 1]), data_format,
                 )

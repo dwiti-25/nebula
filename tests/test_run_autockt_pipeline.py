@@ -8,11 +8,14 @@ through the real orchestration code, not a separate mock of it.
 from __future__ import annotations
 
 import json
+import io
 import math
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+
+import torch
 
 from rl.target_spec import TargetSpec
 
@@ -21,6 +24,7 @@ from experiments.run_autockt_pipeline import (
     PVT_CONDITION_SETS,
     PipelineCandidate,
     _main,
+    _load_checkpoint_state,
     _pvt_result_from_selection,
     filter_nominal_feasible,
     generate_candidates,
@@ -62,6 +66,15 @@ class ValidateTargetTests(unittest.TestCase):
 
 
 class GenerateCandidatesTests(unittest.TestCase):
+    def test_checkpoint_can_be_loaded_from_packaged_bytes(self):
+        payload = io.BytesIO()
+        torch.save({"weight": torch.tensor([1.0])}, payload)
+        with patch.object(Path, "is_file", return_value=False), patch(
+            "experiments.run_autockt_pipeline.read_packaged_bytes", return_value=payload.getvalue(),
+        ):
+            state = _load_checkpoint_state(Path("results/policy.pt"))
+        self.assertTrue(torch.equal(state["weight"], torch.tensor([1.0])))
+
     def test_synthetic_backend_produces_the_requested_episode_count(self):
         candidates = generate_candidates(
             target=TargetSpec.from_existing_thresholds(), checkpoint_path=None,
@@ -102,14 +115,41 @@ class GenerateCandidatesTests(unittest.TestCase):
 
 
 class FilterNominalFeasibleTests(unittest.TestCase):
-    def test_keeps_only_spec_satisfied_candidates(self):
+    def test_keeps_only_strictly_target_satisfied_candidates(self):
+        passing_metrics = {
+            "dfe_locked_phase_eye_height_v": 0.1,
+            "dfe_eye_width_ui": 0.4,
+            "dfe_min_margin_v": 0.0,
+            "ctle_power_w": 0.015,
+        }
         candidates = [
-            PipelineCandidate(0, {}, {}, 10.0, True, 1),
-            PipelineCandidate(1, {}, {}, -1.0, False, 4),
+            PipelineCandidate(0, {}, passing_metrics, 10.0, True, 1),
+            PipelineCandidate(1, {}, {}, -1.0, False, 4, False),
         ]
         feasible = filter_nominal_feasible(candidates)
         self.assertEqual(len(feasible), 1)
         self.assertEqual(feasible[0].episode, 0)
+
+    def test_autockt_terminal_tolerance_does_not_count_as_strict_pass(self):
+        target = TargetSpec.from_hard_target()
+        within_reward_tolerance = {
+            "dfe_locked_phase_eye_height_v": 0.79,
+            "dfe_eye_width_ui": 0.6,
+            "dfe_min_margin_v": 0.35,
+            "ctle_power_w": 0.015,
+        }
+        candidate = PipelineCandidate(0, {}, within_reward_tolerance, 10.0, True, 1)
+        self.assertEqual(filter_nominal_feasible([candidate], target), [])
+
+    def test_simulator_failure_never_counts_as_strict_pass(self):
+        metrics = {
+            "dfe_locked_phase_eye_height_v": 1.0,
+            "dfe_eye_width_ui": 0.8,
+            "dfe_min_margin_v": 0.5,
+            "ctle_power_w": 0.001,
+        }
+        candidate = PipelineCandidate(0, {}, metrics, 10.0, True, 1, False)
+        self.assertEqual(filter_nominal_feasible([candidate]), [])
 
 
 class SelectFinalDesignTests(unittest.TestCase):
@@ -158,6 +198,28 @@ class SelectFinalDesignTests(unittest.TestCase):
         self.assertEqual(selection["selected"]["design_id"], "pipeline_ep0")
         self.assertEqual(selection["pvt"]["pass_rate"], 1.0)
         self.assertTrue(selection["pvt"]["met_minimum_pass_rate"])
+
+    def test_pvt_selection_fails_closed_when_no_candidate_meets_minimum(self):
+        from simulator.config import ProcessCorner, SimulationConditions
+        from simulator.receiver import ReceiverEvaluation
+
+        candidate = PipelineCandidate(
+            0, {"rload_ohm": 1000.0, "rdeg_ohm": 1000.0, "cdeg_f": 5e-13,
+                "itail_a": 1e-4, "dfe_tap_v": 0.0},
+            {"ctle_power_w": 0.001}, 10.0, True, 1,
+        )
+        conditions = (SimulationConditions(ProcessCorner.TT, 27.0, 1.8),)
+
+        def fail_grid(parameters, *, conditions, fidelity):
+            return tuple(ReceiverEvaluation(
+                False, parameters, condition, fidelity, (), {}, "transient", 0.0, "id", {},
+            ) for condition in conditions)
+
+        with patch("analysis.pvt_selection.evaluate_pvt_grid", side_effect=fail_grid):
+            selection = select_final_design([candidate], pvt_conditions=conditions)
+        self.assertIsNone(selection["selected"])
+        self.assertIn("no candidate met", selection["reason"])
+        self.assertEqual(selection["best_available"]["pass_rate"], 0.0)
 
     def test_pvt_tie_is_broken_by_trade_off_preference(self):
         # Task 3 (NEXT IMPLEMENTATION CHUNK): select_final_design must
@@ -239,8 +301,14 @@ class PvtResultFlowsIntoFinalSpecificationTests(unittest.TestCase):
                       SimulationConditions(ProcessCorner.FF, 125.0, 1.71))
 
         def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity):
+            metrics = {
+                "dfe_locked_phase_eye_height_v": 1.0,
+                "dfe_eye_width_ui": 0.8,
+                "dfe_min_margin_v": 0.5,
+                "ctle_power_w": 0.001,
+            }
             return tuple(
-                ReceiverEvaluation(True, parameters, c, fidelity, (), {}, None, 0.0, "id", {})
+                ReceiverEvaluation(True, parameters, c, fidelity, (), metrics, None, 0.0, "id", {})
                 for c in conditions
             )
 
@@ -253,9 +321,9 @@ class PvtResultFlowsIntoFinalSpecificationTests(unittest.TestCase):
 
         self.assertIsNotNone(result["selection"]["selected"])
         pvt_row = next(r for r in result["final_specification"]["rows"] if r["metric"] == "PVT (pass/total)")
-        # must reflect the real 2-condition sweep, not "NOT CLAIMED".
+        # A two-condition sweep cannot establish full PVT coverage.
         self.assertEqual(pvt_row["measured"], "2/2")
-        self.assertEqual(pvt_row["verdict"], "PASS")
+        self.assertEqual(pvt_row["verdict"], "NOT CLAIMED")
 
 
 class MeasureHd3AndNoiseTests(unittest.TestCase):
@@ -302,6 +370,20 @@ class MeasureHd3AndNoiseTests(unittest.TestCase):
 
 
 class RunPipelineHd3NoiseRefinementTests(unittest.TestCase):
+    def test_incomplete_finalist_clears_selection(self):
+        from simulator.receiver import ReceiverEvaluation
+        def incomplete(parameters, conditions, fidelity):
+            return ReceiverEvaluation(True, parameters, conditions, fidelity, (),
+                {"hd3_db": -40.0, "input_referred_noise_vrms": 0.0005}, None, 1.0, "id", {})
+        with patch("experiments.run_autockt_pipeline.generate_candidates", return_value=self._feasible_candidates()), \
+             patch("experiments.run_autockt_pipeline.evaluate_receiver", side_effect=incomplete):
+            result = run_pipeline(target=TargetSpec.from_existing_thresholds(), checkpoint_path=None,
+                                  backend="real", measure_hd3_noise_flag=True)
+        self.assertIsNone(result["selection"]["selected"])
+        self.assertFalse(result["hd3_noise_refinement"]["success"])
+        self.assertNotIn("schematic_path", result)
+        self.assertNotIn("final_specification", result)
+
     def _feasible_candidates(self):
         return [PipelineCandidate(
             0, {"rload_ohm": 1000.0, "rdeg_ohm": 1000.0, "cdeg_f": 5e-13, "itail_a": 1e-4, "dfe_tap_v": 0.0},
@@ -314,7 +396,9 @@ class RunPipelineHd3NoiseRefinementTests(unittest.TestCase):
 
         def fake_evaluate_receiver(parameters, conditions, fidelity):
             return ReceiverEvaluation(True, parameters, conditions, fidelity, (),
-                                       {"hd3_db": -40.0, "input_referred_noise_vrms": 0.0005},
+                                       {**self._feasible_candidates()[0].metrics,
+                                        "hd3_db": -40.0, "input_referred_noise_vrms": 0.0005,
+                                        "peaking_db": 6.0, "dfe_error_count": 0},
                                        None, 90.0, "id", {})
 
         with patch("experiments.run_autockt_pipeline.generate_candidates", return_value=self._feasible_candidates()):

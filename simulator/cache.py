@@ -26,7 +26,7 @@ class EvaluationCache:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        return value if value.get("evaluation_id") == evaluation_id else None
+        return value if isinstance(value, dict) and value.get("evaluation_id") == evaluation_id else None
 
     @contextmanager
     def _key_lock(self, evaluation_id: str):

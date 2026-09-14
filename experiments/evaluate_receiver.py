@@ -19,6 +19,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cdeg", type=float, default=0.5e-12, help="degeneration capacitance in farads")
     parser.add_argument("--itail", type=float, default=100e-6, help="tail current in amperes")
     parser.add_argument("--dfe-tap", type=float, default=0.0, help="one-tap DFE value in volts")
+    parser.add_argument("--mos-width", type=float, default=10.0, help="matched input-pair MOS width in microns")
+    parser.add_argument("--mos-length", type=float, default=0.15, help="matched input-pair MOS length in microns")
+    parser.add_argument("--mos-multiplier", type=int, default=1, help="matched input-pair device multiplier")
     parser.add_argument("--corner", choices=[item.value for item in ProcessCorner], default="tt")
     parser.add_argument("--temperature", type=float, default=27.0)
     parser.add_argument("--supply", type=float, default=1.8)
@@ -41,7 +44,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _parser().parse_args()
-    parameters = ReceiverParameters(args.rload, args.rdeg, args.cdeg, args.itail, args.dfe_tap)
+    parameters = ReceiverParameters(args.rload, args.rdeg, args.cdeg, args.itail, args.dfe_tap,
+                                    args.mos_width, args.mos_length, args.mos_multiplier)
     conditions = SimulationConditions(ProcessCorner(args.corner), args.temperature, args.supply)
     fidelity = EvaluationFidelity[args.fidelity.upper()]
     timeout = args.timeout if args.timeout is not None else (180.0 if fidelity >= EvaluationFidelity.FINAL else 60.0)

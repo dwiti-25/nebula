@@ -47,7 +47,7 @@ from .target_spec import SPEC_NAMES, TargetSpec
 
 RewardFn = Callable[..., float]
 
-STATE_SCHEMAS = ("v1", "v2")
+STATE_SCHEMAS = ("v1", "v2", "v3")
 
 # SPEC_NAMES metrics as they're keyed in METRIC_OBSERVATION_NAMES's
 # validity-flag half (see simulator/rl_adapter.py::observation_from_evaluation
@@ -177,13 +177,21 @@ class AutoCktReceiverEnv:
             raise ValueError("horizon must be positive")
         if state_schema not in STATE_SCHEMAS:
             raise ValueError(f"state_schema must be one of {STATE_SCHEMAS}, got {state_schema!r}")
+        from simulator.design_schema import parameter_names
+        self.parameter_names = parameter_names(state_schema)
         self.target_pool = tuple(target_pool)
         self.initial_indices = tuple(initial_indices)
-        if len(self.initial_indices) != len(PARAMETER_NAMES):
-            raise ValueError(f"initial_indices must have {len(PARAMETER_NAMES)} entries")
+        if len(self.initial_indices) != len(self.parameter_names):
+            raise ValueError(f"initial_indices must have {len(self.parameter_names)} entries")
         self.horizon = horizon
-        self.grids: dict[str, ParameterGrid] = dict(grids) if grids is not None else build_parameter_grids()
-        self.adapter = adapter if adapter is not None else ReceiverRLAdapter(seed=seed)
+        self.grids: dict[str, ParameterGrid] = dict(grids) if grids is not None else build_parameter_grids(version=state_schema)
+        self.adapter = adapter if adapter is not None else ReceiverRLAdapter(seed=seed, version=state_schema)
+        if tuple(self.grids) != self.parameter_names:
+            raise ValueError("Grid order does not match state schema")
+        if state_schema == "v3" and self.adapter.version != "v3":
+            raise ValueError("v3 requires an eight-parameter adapter")
+        if state_schema == "v3":
+            self.adapter.grids = self.grids
         self._episode_rng = random.Random(seed)
         self.randomize_initial_state = randomize_initial_state
         self._init_rng = random.Random(seed)  # separate stream, see class docstring
@@ -221,7 +229,7 @@ class AutoCktReceiverEnv:
 
         return tuple(
             self.grids[name].clip_index(anchor + self._init_rng.choice(INITIAL_STATE_PERTURBATION_CHOICES))
-            for name, anchor in zip(PARAMETER_NAMES, self.initial_indices)
+            for name, anchor in zip(self.parameter_names, self.initial_indices)
         )
 
     def _normalized_indices(self) -> tuple[float, ...]:
@@ -239,7 +247,7 @@ class AutoCktReceiverEnv:
         accepts/documents raw indices for direct callers).
         """
 
-        return tuple(self.grids[name].normalized_index(i) for name, i in zip(PARAMETER_NAMES, self.indices))
+        return tuple(self.grids[name].normalized_index(i) for name, i in zip(self.parameter_names, self.indices))
 
     def budget_exhausted(self) -> bool:
         """[NEBULA ADAPTATION -- Required change 4] checked before ANY
@@ -247,11 +255,17 @@ class AutoCktReceiverEnv:
         max_total_evaluations docstring above.
         """
 
-        return self.adapter.total_evaluations >= self.max_total_evaluations
+        from simulator.runtime import expired
+        return expired() or self.adapter.total_evaluations >= self.max_total_evaluations
 
     def _build_state(
         self, metrics: Mapping[str, float], *, metrics_valid: bool, failure_stage: Optional[str],
     ) -> tuple[float, ...]:
+        if self.state_schema == "v3":
+            from .autockt_v3 import build_state_v3
+            return build_state_v3(metrics, self.target, self._normalized_indices(), failure_stage=failure_stage,
+                parameters={name: self.grids[name].value_at(i) for name, i in zip(self.parameter_names, self.indices)},
+                channel_kwargs=self.adapter.evaluator_kwargs)
         if self.state_schema == "v2":
             return build_state_v2(
                 metrics, self.target, self._normalized_indices(),
@@ -282,8 +296,9 @@ class AutoCktReceiverEnv:
         reset_evaluation_info: dict[str, object] = {"evaluated": False}
         if self.evaluate_on_reset and not self.budget_exhausted():
             normalized_action = indices_to_normalized_action(self.indices, self.grids)
+            self.adapter.evaluation_phase = "episode_reset"
             rl_step = self.adapter.step(normalized_action)
-            metrics = metrics_from_observation(rl_step.observation)
+            metrics = rl_step.info["raw_metrics"] if self.state_schema == "v3" else metrics_from_observation(rl_step.observation)
             failure_stage = rl_step.info["failure_stage"]
             metrics_valid = spec_metrics_valid(rl_step.observation)
             reset_evaluation_info = {
@@ -308,20 +323,29 @@ class AutoCktReceiverEnv:
             info = {
                 "success": False, "spec_satisfied": False, "step_count": self.step_count,
                 "failure_stage": "budget_exhausted", "total_evaluation_count": self.adapter.total_evaluations,
-                "parameters": None, "indices": self.indices, "metrics": {},
+                "parameters": None, "indices": self.indices, "metrics": {}, "metrics_valid_mask": {},
             }
             return AutoCktStep(state, 0.0, False, True, info)
 
         self.indices = apply_action(self.indices, choices, self.grids, deltas=self.action_deltas)
         normalized_action = indices_to_normalized_action(self.indices, self.grids)
+        self.adapter.evaluation_phase = "policy_step"
         rl_step = self.adapter.step(normalized_action)
-        metrics = metrics_from_observation(rl_step.observation)
+        metrics = rl_step.info["raw_metrics"] if self.state_schema == "v3" else metrics_from_observation(rl_step.observation)
         success = rl_step.info["failure_stage"] is None
         failure_stage = rl_step.info["failure_stage"]
         metrics_valid = spec_metrics_valid(rl_step.observation)
 
         reward_result: Optional[RewardResult] = None
-        if self.use_reward_v2:
+        if self.state_schema == "v3":
+            from .autockt_v3 import reward_v3
+            metrics = dict(metrics)
+            parameters = rl_step.info["parameters"]
+            metrics["partial_mos_channel_area_um2"] = 2 * parameters["mos_width_um"] * parameters["mos_length_um"] * parameters["mos_multiplier"]
+            reward_result = reward_v3(metrics, self.target, success=success, failure_stage=failure_stage)
+            reward = reward_result.total
+            done = reward_result.strict_target_pass
+        elif self.use_reward_v2:
             reward_result = reward_v2(
                 metrics, self.target, metrics_valid=metrics_valid, success=success, failure_stage=failure_stage,
             )
@@ -352,8 +376,20 @@ class AutoCktReceiverEnv:
             "metrics": metrics,
             "metrics_valid": metrics_valid,
             "metrics_valid_mask": validity_mask_from_observation(rl_step.observation, METRIC_OBSERVATION_NAMES),
-            "reward_result": reward_result,  # None unless use_reward_v2=True
+            "cache_hit": rl_step.info.get("cache_hit"),
+            "runtime_s": rl_step.info.get("runtime_s"),
+            "evaluation_id": rl_step.info.get("evaluation_id"),
+            "reward_result": reward_result,
         }
+        from analysis.run_graph import ACTIVE
+        graph = ACTIVE.get()
+        if graph:
+            graph.node("policy_action", f"Policy step {self.step_count}", "terminal" if done else "truncated" if truncated else "ongoing", {
+                "choices": list(choices), "indices": list(self.indices), "parameters": info["parameters"],
+                "target": self.target.as_dict(), "metrics": metrics, "reward": reward,
+                "reward_components": reward_result.components if reward_result else {},
+                "strict_pass": reward_result.strict_target_pass if reward_result else None,
+                "state_after": list(state), "evaluation_id": info["evaluation_id"]}, graph.origins.get(info["evaluation_id"], graph.root))
         return AutoCktStep(state, reward, done, truncated, info)
 
 

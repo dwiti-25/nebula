@@ -40,6 +40,7 @@ import argparse
 import copy
 import json
 from pathlib import Path
+import uuid
 
 import torch
 
@@ -48,6 +49,10 @@ from simulator.rl_adapter import ACTION_SCHEMA_VERSION, ReceiverRLAdapter, RLBud
 from rl.autockt_env import AutoCktReceiverEnv
 from rl.autockt_reward import AUTOCKT_REWARD_VERSION, graded_autockt_reward
 from rl.autockt_state import STATE_DIM
+from rl.autockt_state_v2 import STATE_DIM_V2
+from rl.checkpoint import save_full_checkpoint, export_inference_only
+from rl.runtime_contract import STATE_DIMS, add_channel_arguments, channel_kwargs, runtime_contract
+from rl.evaluation_cache import make_cached_evaluator
 from rl.parameter_grid import (
     DEFAULT_GRID_POINTS,
     PARAMETER_NAMES,
@@ -59,6 +64,7 @@ from rl.ppo_agent import PPOAgent
 from rl.synthetic_benchmark import synthetic_evaluate_receiver
 from rl.target_spec import EXISTING_THRESHOLDS, SPEC_NAMES, TargetSpec, sample_target_pool
 from rl.trainer import train
+from analysis.run_evidence import JsonlEventWriter
 
 
 def _build_target_pools(args: argparse.Namespace) -> tuple[tuple[TargetSpec, ...], tuple[TargetSpec, ...]]:
@@ -150,6 +156,8 @@ def _evaluate_checkpoint(
     seed: int,
     episodes: int,
     reward_fn=None,
+    rl_version: str = "v1",
+    independent_budget: bool = False,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     """[NEBULA ADAPTATION] Frozen-checkpoint evaluation, not part of the
     AutoCkt-replicated training loop itself. Runs `episodes` fully
@@ -165,6 +173,12 @@ def _evaluate_checkpoint(
     """
 
     agent.policy.load_state_dict(policy_state)
+    # Frozen checkpoint evaluation gets its own budget and cache namespace.
+    if independent_budget or rl_version == "v3":
+        evaluator = getattr(adapter.evaluator, "evaluator", adapter.evaluator)
+        adapter = ReceiverRLAdapter(evaluator=evaluator, conditions=adapter.conditions, fidelity=adapter.fidelity,
+            budget=RLBudget(max(1, episodes * (horizon + 1))), seed=seed,
+            evaluator_kwargs=adapter.evaluator_kwargs, version=rl_version)
     eval_env = AutoCktReceiverEnv(
         target_pool=training_pool,
         initial_indices=initial_indices,
@@ -174,6 +188,8 @@ def _evaluate_checkpoint(
         seed=seed,
         randomize_initial_state=randomize_initial_state,
         reward_fn=reward_fn,
+        evaluate_on_reset=rl_version != "v1", state_schema=rl_version,
+        use_reward_v2=rl_version != "v1",
     )
     rows: list[dict[str, object]] = []
     episode_rewards = []
@@ -269,7 +285,7 @@ def _resolve_initial_indices(
     """
 
     if source == "grid-center":
-        return tuple(len(grids[name]) // 2 for name in PARAMETER_NAMES)
+        return tuple(len(grids[name]) // 2 for name in grids)
     if source == "verified":
         return verified_initial_indices(grids)
     raise ValueError(f"unknown initial-indices source: {source}")
@@ -340,6 +356,15 @@ def main() -> int:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-evaluations", type=int, default=10_000)
+    parser.add_argument("--workers", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--search-seconds", type=float, default=None, help="Training-only wall-clock budget")
+    parser.add_argument("--rl-version", choices=("v1", "v2", "v3"), default="v1",
+                        help="Keep v1 reproducible or opt into corrected PPO v2.")
+    parser.add_argument("--evaluation-cache", action="store_true",
+                        help="Reuse exact repeated evaluations without changing trajectories.")
+    parser.add_argument("--events-output", type=Path, default=None,
+                        help="Append-only typed PPO events; defaults beside --output.")
+    parser.add_argument("--save-full-checkpoint", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=Path("results/autockt_training.jsonl"))
     parser.add_argument(
         "--initial-indices-source", choices=("verified", "grid-center"), default="verified",
@@ -370,20 +395,39 @@ def main() -> int:
         "None (unchanged existing behavior: nothing is persisted to disk). Does not "
         "affect training in any way -- the save happens strictly after train() returns.",
     )
+    parser.add_argument("--summary-output", type=Path, default=None)
+    parser.add_argument("--graph-output", type=Path, default=None)
+    parser.add_argument("--resume", type=Path, default=None, help="Resume a trusted full PPO v3 checkpoint with the same runtime contract")
+    add_channel_arguments(parser)
     args = parser.parse_args()
 
     training_pool, validation_pool = _build_target_pools(args)
-    reward_fn = graded_autockt_reward if args.reward_mode == "graded" else None
+    reward_fn = graded_autockt_reward if args.reward_mode == "graded" and args.rl_version == "v1" else None
+    effective_reward_version = f"reward_{args.rl_version}" if args.rl_version != "v1" else AUTOCKT_REWARD_VERSION
 
-    grids = build_parameter_grids(args.grid_points, spacing=args.grid_spacing)
+    grids = build_parameter_grids(args.grid_points, spacing=args.grid_spacing, version=args.rl_version)
+    contract = runtime_contract(args.rl_version, grids, backend=args.backend, **channel_kwargs(args))
+    contract["training"] = {"targets": [target.as_dict() for target in training_pool], "seed": args.seed,
+        "horizon": args.horizon, "randomize_initial_state": args.randomize_initial_state,
+        "episodes_per_update": args.episodes_per_update, "ppo_epochs": args.ppo_epochs,
+        "minibatch_size": args.minibatch_size}
+    if args.workers != 1:
+        contract["training"]["workers"] = args.workers
     initial_indices = _resolve_initial_indices(grids, args.initial_indices_source)
 
-    if args.backend == "synthetic":
+    from rl.synthetic_v3 import synthetic_evaluate_receiver_v3
+    synthetic = synthetic_evaluate_receiver_v3 if args.rl_version == "v3" else synthetic_evaluate_receiver
+    evaluator = synthetic if args.backend == "synthetic" else None
+    if args.evaluation_cache:
+        from simulator.receiver import evaluate_receiver
+        evaluator = make_cached_evaluator(evaluator or evaluate_receiver)
+    if evaluator is not None:
         adapter = ReceiverRLAdapter(
-            evaluator=synthetic_evaluate_receiver, budget=RLBudget(args.max_evaluations), seed=args.seed
+            evaluator=evaluator, budget=RLBudget(args.max_evaluations), seed=args.seed,
+            version=args.rl_version, evaluator_kwargs=channel_kwargs(args)
         )
     else:
-        adapter = ReceiverRLAdapter(budget=RLBudget(args.max_evaluations), seed=args.seed)
+        adapter = ReceiverRLAdapter(budget=RLBudget(args.max_evaluations), seed=args.seed, version=args.rl_version, evaluator_kwargs=channel_kwargs(args))
     env = AutoCktReceiverEnv(
         target_pool=training_pool,
         initial_indices=initial_indices,
@@ -393,18 +437,58 @@ def main() -> int:
         seed=args.seed,
         randomize_initial_state=args.randomize_initial_state,
         reward_fn=reward_fn,
+        evaluate_on_reset=args.rl_version != "v1", state_schema=args.rl_version,
+        use_reward_v2=args.rl_version != "v1", max_total_evaluations=args.max_evaluations,
     )
-    agent = PPOAgent(state_dim=STATE_DIM, num_heads=len(PARAMETER_NAMES), seed=args.seed)
+    agent = PPOAgent(state_dim=STATE_DIMS[args.rl_version],
+                     num_heads=len(grids), seed=args.seed)
+    start_update = start_episode = 0
+    if args.resume:
+        if args.rl_version != "v3":
+            raise ValueError("CLI resume is supported for v3 full checkpoints only")
+        from rl.checkpoint import load_full_checkpoint
+        restored = load_full_checkpoint(args.resume, agent=agent, state_schema="v3", reward_schema="v3", expected_contract=contract)
+        adapter.total_evaluations = restored.evaluation_count
+        start_update = restored.update_count
+        saved_env = restored.hyperparameters["environment"]
+        saved_initial = saved_env.get("initial_indices")
+        if saved_initial is None:
+            # Legacy checkpoints predate explicit initial-state provenance.
+            raise ValueError("Cannot verify legacy resume initial state: checkpoint lacks initial_indices. Inference remains supported.")
+        elif tuple(saved_initial) != tuple(initial_indices):
+            raise ValueError("Resume initial indices differ from checkpoint")
+        env._episode_rng.setstate(saved_env["episode_rng"])
+        env._init_rng.setstate(saved_env["initial_rng"])
+        start_episode = saved_env["episodes_completed"]
     initial_policy_state = copy.deepcopy(agent.policy.state_dict()) if args.checkpoint_eval_episodes > 0 else None
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     output_file = args.output.open("w", encoding="utf-8")
+    run_id = uuid.uuid4().hex
+    events_path = args.events_output or args.output.with_suffix(".events.jsonl")
+    from analysis.run_graph import RunGraph, ACTIVE
+    import atexit
+    graph = RunGraph({"backend": args.backend, "runtime_contract": contract, "seed": args.seed, "resume": args.resume},
+                     args.graph_output or args.output.with_suffix(".graph.json"), event_path=events_path)
+    graph_token = ACTIVE.set(graph)
+    def save_interrupted_graph():
+        if graph.data["status"] == "running":
+            graph.finish(error="Training interrupted before completion")
+    atexit.register(save_interrupted_graph)
+    event_writer = JsonlEventWriter(events_path, metadata={
+        "algorithm": "ppo", "configuration_id": f"ppo_{args.rl_version}",
+        "state_schema": args.rl_version,
+        "reward_schema": effective_reward_version,
+        "runtime_contract": contract,
+        "target_split": "training", "training_seed": args.seed,
+        "tuning_seed": None, "final_evaluation_seed": None,
+    })
 
     def on_step(row: dict[str, object]) -> None:
         record = {
             **row,
-            "action_schema_version": ACTION_SCHEMA_VERSION,
-            "reward_version": AUTOCKT_REWARD_VERSION,
+            "action_schema_version": contract["action_schema_version"],
+            "reward_version": effective_reward_version,
             "seed": args.seed,
         }
         output_file.write(json.dumps(record) + "\n")
@@ -419,20 +503,22 @@ def main() -> int:
             {
                 "run_start": True,
                 "seed": args.seed,
-                "reward_version": AUTOCKT_REWARD_VERSION,
-                "action_schema_version": ACTION_SCHEMA_VERSION,
+                "reward_version": effective_reward_version,
+                "action_schema_version": contract["action_schema_version"],
                 "spec_names": SPEC_NAMES,
                 "training_targets": [spec.as_dict() for spec in training_pool],
                 "validation_targets": [spec.as_dict() for spec in validation_pool],
                 "initial_indices": initial_indices,
                 "initial_parameters": {
-                    name: grids[name].value_at(index) for name, index in zip(PARAMETER_NAMES, initial_indices)
+                    name: grids[name].value_at(index) for name, index in zip(grids, initial_indices)
                 },
                 "horizon": args.horizon,
                 "grid_points": args.grid_points,
                 "grid_spacing": args.grid_spacing,
                 "randomize_initial_state": args.randomize_initial_state,
                 "reward_mode": args.reward_mode,
+                "rl_version": args.rl_version,
+                "events_output": str(events_path),
             },
             indent=2,
             default=list,
@@ -449,10 +535,14 @@ def main() -> int:
         minibatch_size=args.minibatch_size,
         on_step=on_step,
         on_update=on_update,
+        on_event=event_writer,
+        run_id=run_id,
+        start_update=start_update, start_episode=start_episode,
+        workers=args.workers, search_seconds=args.search_seconds,
     )
     if args.save_final_policy is not None:
         args.save_final_policy.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(agent.policy.state_dict(), args.save_final_policy)
+        export_inference_only(args.save_final_policy, agent=agent, metadata=contract if args.rl_version == "v3" else None)
     checkpoint_summaries: list[dict[str, object]] = []
     if args.checkpoint_eval_episodes > 0:
         final_policy_state = copy.deepcopy(agent.policy.state_dict())
@@ -471,6 +561,8 @@ def main() -> int:
                 seed=checkpoint_seed,
                 episodes=args.checkpoint_eval_episodes,
                 reward_fn=reward_fn,
+                rl_version=args.rl_version,
+                independent_budget=True,
             )
             checkpoint_summaries.append(summary_row)
             print(json.dumps({"checkpoint_complete": True, **summary_row}, indent=2), flush=True)
@@ -481,10 +573,33 @@ def main() -> int:
         # of which checkpoint was evaluated last.
         agent.policy.load_state_dict(final_policy_state)
 
+    if args.save_full_checkpoint is not None:
+        save_full_checkpoint(
+            args.save_full_checkpoint, agent=agent, update_count=start_update + len(result.updates),
+            evaluation_count=result.total_evaluations, state_schema=args.rl_version,
+            reward_schema=args.rl_version,
+            grid_points=args.grid_points, grid_spacing=args.grid_spacing,
+            target_ids=tuple(f"training_{index}" for index, _ in enumerate(training_pool)),
+            extra_hyperparameters={"runtime_contract": contract, "environment": {
+                "episode_rng": env._episode_rng.getstate(), "initial_rng": env._init_rng.getstate(),
+                "initial_indices": list(env.initial_indices),
+                "episodes_completed": start_episode + sum(row["episodes"] for row in result.updates),
+                "horizon": args.horizon, "randomize_initial_state": args.randomize_initial_state,
+                "seed": args.seed}},
+            repo_root=Path(__file__).resolve().parents[1],
+        )
+
+    env.adapter = ReceiverRLAdapter(evaluator=getattr(adapter.evaluator, "evaluator", adapter.evaluator),
+        budget=RLBudget(max(1, len(validation_pool) * (args.horizon + 1))),
+        seed=args.seed + 600000, version=args.rl_version, evaluator_kwargs=channel_kwargs(args))
+    env.max_total_evaluations = env.adapter.budget.max_evaluations
     validation_rows = _evaluate_validation_pool(env=env, agent=agent, validation_pool=validation_pool)
 
     summary = {
         "run_complete": True,
+        "workers": args.workers,
+        "search_seconds": args.search_seconds,
+        "completed_updates": len(result.updates),
         "updates": args.updates,
         "total_evaluations": result.total_evaluations,
         "best_reward": result.best_reward,
@@ -494,9 +609,22 @@ def main() -> int:
         "checkpoint_evaluations": checkpoint_summaries,
         "seed": args.seed,
         "reward_mode": args.reward_mode,
+        "rl_version": args.rl_version,
+        "reward_version": effective_reward_version,
+        "events_output": str(events_path),
         "output": str(args.output),
+        "workflow": "train", "backend": args.backend,
+        "policy_path": str(args.save_final_policy) if args.save_final_policy else None,
+        "full_checkpoint_path": str(args.save_full_checkpoint) if args.save_full_checkpoint else None,
     }
     print(json.dumps(summary, indent=2))
+    if args.summary_output:
+        args.summary_output.parent.mkdir(parents=True, exist_ok=True)
+        args.summary_output.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    output_file.close()
+    graph.finish(summary)
+    ACTIVE.reset(graph_token)
+    atexit.unregister(save_interrupted_graph)
     return 0
 
 

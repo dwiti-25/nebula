@@ -57,7 +57,7 @@ VERIFICATION_BENCH = BENCHES / "receiver_transient.cir"
 # netlist's own `.param` line (see circuits/blocks/ctle.spice). dfe_tap_v
 # is deliberately excluded -- it never reaches any netlist (sec 21 finding
 # H); ReceiverParameters.spice_parameters() confirms this independently.
-NETLIST_PARAMETER_NAMES = ("RLOAD", "RDEG", "CDEG", "ITAIL_VAL")
+NETLIST_PARAMETER_NAMES = ("RLOAD", "RDEG", "CDEG", "ITAIL_VAL", "MOS_W", "MOS_L", "MOS_M")
 
 
 # [CORRECTNESS NOTE, confirmed by direct test before use] circuits/blocks/
@@ -75,11 +75,11 @@ NETLIST_PARAMETER_NAMES = ("RLOAD", "RDEG", "CDEG", "ITAIL_VAL")
 # already substitutes bench parameters) around an UNMODIFIED `.include` of
 # the real ctle.spice block file.
 _WRAPPER_TEMPLATE = """\
-.param RLOAD=1k RDEG=1k CDEG=0.5p ITAIL_VAL=100u
+.param RLOAD=1k RDEG=1k CDEG=0.5p ITAIL_VAL=100u MOS_W=10 MOS_L=0.15 MOS_M=1
 .include "{block_path}"
 
 XCTLE inp inn outp outn vdd 0 CTLE
-+ RLOAD={{RLOAD}} RDEG={{RDEG}} CDEG={{CDEG}} ITAIL_VAL={{ITAIL_VAL}}
++ RLOAD={{RLOAD}} RDEG={{RDEG}} CDEG={{CDEG}} ITAIL_VAL={{ITAIL_VAL}} MOS_W={{MOS_W}} MOS_L={{MOS_L}} MOS_M={{MOS_M}}
 .end
 """
 
@@ -105,6 +105,9 @@ def render_final_schematic(
         "RDEG": parameters.rdeg_ohm,
         "CDEG": parameters.cdeg_f,
         "ITAIL_VAL": parameters.itail_a,
+        "MOS_W": parameters.mos_width_um,
+        "MOS_L": parameters.mos_length_um,
+        "MOS_M": parameters.mos_multiplier,
     })
 
     model_path: str

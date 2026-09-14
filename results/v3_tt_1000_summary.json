@@ -1,0 +1,29 @@
+{
+  "run_complete": true,
+  "updates": 100,
+  "total_evaluations": 692,
+  "best_reward": 10.309617722945129,
+  "best_parameters": {
+    "rload_ohm": 2928.5714285714284,
+    "rdeg_ohm": 485.7142857142857,
+    "cdeg_f": 9.614285714285712e-13,
+    "itail_a": 0.00067,
+    "dfe_tap_v": 0.019047619047618758,
+    "mos_width_um": 10.0,
+    "mos_length_um": 0.15,
+    "mos_multiplier": 1
+  },
+  "any_spec_satisfied_in_training": true,
+  "validation_results": [],
+  "checkpoint_evaluations": [],
+  "seed": 101,
+  "reward_mode": "terminal",
+  "rl_version": "v3",
+  "reward_version": "reward_v3",
+  "events_output": "results\\v3_tt_1000_events.jsonl",
+  "output": "results\\v3_tt_1000_training.jsonl",
+  "workflow": "train",
+  "backend": "real",
+  "policy_path": "results\\ppo_v3_tt_1000_policy.pt",
+  "full_checkpoint_path": "results\\ppo_v3_tt_1000_full.pt"
+}

@@ -46,7 +46,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from simulator.receiver import BLOCK
+from simulator.receiver import BLOCK, ReceiverParameters
 
 _DEVICE_LINE_RE = re.compile(
     r"^\s*X(\w+)\s+.*?\bsky130_fd_pr__nfet_01v8\b.*?\bW\s*=\s*([0-9.eE+-]+)\s+L\s*=\s*([0-9.eE+-]+)",
@@ -59,10 +59,11 @@ class TransistorDevice:
     name: str
     width_um: float
     length_um: float
+    multiplier: int = 1
 
     @property
     def channel_area_um2(self) -> float:
-        return self.width_um * self.length_um
+        return self.width_um * self.length_um * self.multiplier
 
 
 @dataclass(frozen=True)
@@ -118,7 +119,10 @@ def parse_transistor_devices(source: str) -> tuple[TransistorDevice, ...]:
     return devices
 
 
-def estimate_ctle_area(block_path: str | Path = BLOCK) -> AreaEstimate:
+def estimate_ctle_area(
+    block_path: str | Path = BLOCK,
+    parameters: ReceiverParameters | None = None,
+) -> AreaEstimate:
     """Computes the CTLE's transistor channel area from the real,
     unmodified circuit file (default: circuits/blocks/ctle.spice, the same
     file every real evaluation and experiments/export_final_schematic.py
@@ -127,7 +131,17 @@ def estimate_ctle_area(block_path: str | Path = BLOCK) -> AreaEstimate:
     """
 
     resolved = Path(block_path)
-    devices = parse_transistor_devices(resolved.read_text(encoding="utf-8"))
+    source = resolved.read_text(encoding="utf-8")
+    if "W={MOS_W}" in source and "L={MOS_L}" in source:
+        sized = parameters or ReceiverParameters()
+        devices = tuple(
+            TransistorDevice(name=name, width_um=sized.mos_width_um,
+                             length_um=sized.mos_length_um,
+                             multiplier=int(sized.mos_multiplier))
+            for name in ("MP", "MN")
+        )
+    else:
+        devices = parse_transistor_devices(source)
     total_channel_area_um2 = sum(device.channel_area_um2 for device in devices)
     return AreaEstimate(
         source_file=str(resolved),
@@ -147,6 +161,7 @@ def format_area_report(estimate: AreaEstimate) -> str:
     for device in estimate.devices:
         lines.append(
             f"    {device.name}: W={device.width_um}um L={device.length_um}um "
+            f"M={device.multiplier} "
             f"-> {device.channel_area_um2:.4g} um^2"
         )
     lines.append("")

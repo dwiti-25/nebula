@@ -13,6 +13,13 @@ from __future__ import annotations
 import unittest
 
 SPICE_FREE_MODULES = [
+    "tests.test_qualification_sequence",
+    "tests.test_v3_dashboard",
+    "tests.test_mos_area_expansion",
+    "tests.test_parser",
+    "tests.test_receiver_components",
+    "tests.test_runtime_integration",
+    "tests.test_v3_integration",
     "tests.test_autockt_rl",
     "tests.test_synthetic_benchmark",
     "tests.test_baseline_comparison",
@@ -27,11 +34,14 @@ SPICE_FREE_MODULES = [
     "tests.test_pvt_diagnose",
     "tests.test_area_estimate",
     "tests.test_design_catalog",
+    "tests.test_target_assessment",
     "tests.test_pvt_selection",
     "tests.test_final_specification",
     "tests.test_run_autockt_pipeline",
     "tests.test_learning_evidence",
     "tests.test_benchmark_report",
+    "tests.test_artifact_integrity",
+    "tests.test_performance_dashboard",
     "tests.test_web_ui",
     "tests.test_broader_generalization_check",
     "tests.test_rl_ppo_v2",
@@ -40,6 +50,7 @@ SPICE_FREE_MODULES = [
     "tests.test_rl_ppo_v2_ablation",
     "tests.test_evaluation_cache",
     "tests.test_rl_runtime_efficiency_study",
+    "tests.test_phase7_rl_integration",
 ]
 
 

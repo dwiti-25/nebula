@@ -7,6 +7,14 @@
 results/*.jsonl
 results/*.jsonl.*.json
 results/*.csv
+results/web_ui_runs/
+results/qualification_cache/
+# Submission evidence consumed by the v3 dashboard and qualification report.
+!results/v3_tt_1000_events.jsonl
+!results/v3_tt_1000_training.jsonl
+!results/v3_tt_1000_inference.events.jsonl
+!results/v3_ui_inference_20260912.events.jsonl
+!results/v3_nominal_final_20260913.jsonl
 generated/
 .nebula-cache/
 
@@ -19,6 +27,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.mplconfig/
 
 # macOS
 .DS_Store
@@ -27,3 +36,5 @@ venv/
 .ciel/
 .local-pdk/
 local_backup/
+.local-validation/
+external/channel_candidates/

@@ -9,6 +9,7 @@ import unittest
 
 from analysis.final_specification import build_final_specification_report, format_report
 from analysis.pvt_selection import PVTPointResult, summarize_pvt_results
+from rl.target_spec import TargetSpec
 
 DESIGN_A_PARAMS = {
     "rload_ohm": 2342.472156058411, "rdeg_ohm": 822.3558626926603,
@@ -82,7 +83,7 @@ class BuildReportTests(unittest.TestCase):
         by_metric = {row["metric"]: row for row in report["rows"]}
         pvt_row = by_metric["PVT (pass/total)"]
         self.assertEqual(pvt_row["measured"], "1/2")
-        self.assertEqual(pvt_row["verdict"], "PARTIAL")
+        self.assertEqual(pvt_row["verdict"], "FAIL")
         self.assertIn("ff", pvt_row["source"])
 
     def test_pvt_row_is_pass_at_full_pass_rate(self):
@@ -96,7 +97,7 @@ class BuildReportTests(unittest.TestCase):
             pvt_result=pvt,
         )
         by_metric = {row["metric"]: row for row in report["rows"]}
-        self.assertEqual(by_metric["PVT (pass/total)"]["verdict"], "PASS")
+        self.assertEqual(by_metric["PVT (pass/total)"]["verdict"], "NOT CLAIMED")
 
     def test_no_pvt_result_is_not_claimed(self):
         report = build_final_specification_report(
@@ -106,6 +107,18 @@ class BuildReportTests(unittest.TestCase):
         )
         by_metric = {row["metric"]: row for row in report["rows"]}
         self.assertEqual(by_metric["PVT (pass/total)"]["verdict"], "NOT CLAIMED")
+
+    def test_report_qualifies_against_the_requested_target(self):
+        target = TargetSpec(2.0, 0.4, 0.0, 0.015)
+        report = build_final_specification_report(
+            design_id="design_a", parameters=DESIGN_A_PARAMS,
+            nominal_metrics=DESIGN_A_NOMINAL_METRICS, nominal_source="test fixture",
+            target=target,
+        )
+        self.assertEqual(report["requested_target"], target.as_dict())
+        self.assertFalse(report["target_qualification"]["passed"])
+        failed = [m["name"] for m in report["target_qualification"]["metrics"] if not m["passed"]]
+        self.assertEqual(failed, ["dfe_locked_phase_eye_height_v"])
 
 
 class FormatReportTests(unittest.TestCase):

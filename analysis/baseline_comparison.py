@@ -47,6 +47,9 @@ from typing import Any, Optional
 
 from simulator.rl_adapter import normalized_action_to_parameters
 from dataclasses import asdict as _dc_asdict
+from analysis.artifact_store import read_packaged_bytes
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 RECEIVER_SEARCH_SCHEMA = "receiver_search_v2"
 CEM_SCHEMA = "cem_v1"
@@ -56,8 +59,20 @@ UNKNOWN_SCHEMA = "unknown"
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if path.is_file():
+        text = path.read_text(encoding="utf-8")
+    else:
+        resolved = path.resolve()
+        try:
+            relative = resolved.relative_to(PROJECT_ROOT)
+        except ValueError:
+            relative = path
+        packaged = read_packaged_bytes(PROJECT_ROOT, relative)
+        if packaged is None:
+            raise FileNotFoundError(path)
+        text = packaged.decode("utf-8")
     rows: list[dict[str, Any]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
         try:
