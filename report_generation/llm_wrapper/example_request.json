@@ -1,0 +1,35 @@
+{
+  "request_text": "Find a receiver design with eye width above 0.70 UI, eye height above 1.0 V, power below 2 mW, using the TT PPO v3 checkpoint, with nominal verification.",
+
+  "parsed_by_deterministic_parser": {
+    "dfe_eye_width_ui": 0.7,
+    "dfe_locked_phase_eye_height_v": 1.0,
+    "dfe_min_margin_v": 0.0,
+    "ctle_power_w": 0.002
+  },
+  "explicit_fields": [
+    "dfe_eye_width_ui",
+    "dfe_locked_phase_eye_height_v",
+    "ctle_power_w"
+  ],
+
+  "operator_supplied_flags": {
+    "checkpoint": "results/ppo_v3_tt_1000_policy.pt",
+    "rl_version": "v3",
+    "pvt_condition_set": "none",
+    "backend": "real",
+    "_comment": "As implemented today, nebula/target_parsing.py extracts ONLY the four numeric TargetSpec fields (eye width, eye height, margin, power) from free text. Checkpoint choice, RL version, and verification scope ('nominal' vs a PVT sweep) are NOT auto-extracted from the sentence -- they are separate CLI flags (--checkpoint, --rl-version, --pvt-condition-set) that a human operator (or a future extension) must still supply. This file documents what those flags would be for this request, not something the current parser inferred from the words 'TT PPO v3 checkpoint' or 'nominal verification'."
+  },
+
+  "resulting_pipeline_argv": [
+    "python", "-m", "experiments.run_autockt_pipeline",
+    "--target-json", "{\"dfe_locked_phase_eye_height_v\": 1.0, \"dfe_eye_width_ui\": 0.7, \"dfe_min_margin_v\": 0.0, \"ctle_power_w\": 0.002}",
+    "--backend", "real",
+    "--rl-version", "v3",
+    "--episodes", "3",
+    "--horizon", "4",
+    "--pvt-condition-set", "none",
+    "--output", "results/llm_wrapper_runs/<uuid>.json",
+    "--checkpoint", "results/ppo_v3_tt_1000_policy.pt"
+  ]
+}
