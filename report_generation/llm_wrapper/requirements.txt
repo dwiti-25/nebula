@@ -1,0 +1,10 @@
+# Runs with none of these installed, using the deterministic mock parser
+# (NEBULA_LLM_PROVIDER=mock or --llm-provider mock).
+
+anthropic>=0.25   # only needed for LLM-assisted parsing (NEBULA_LLM_PROVIDER=anthropic, the default)
+
+# The underlying pipeline this wrapper shells out to
+# (experiments/run_autockt_pipeline.py, at the repo root) additionally
+# needs the project's own requirements.txt (numpy, torch, matplotlib) --
+# install from the repo root, not from this folder:
+#   pip install -r ../../requirements.txt
