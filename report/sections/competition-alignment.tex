@@ -45,7 +45,7 @@ PVT: TT/SS/FF/SF/FS, $\mathrm{VDD}\pm5\%$, \SIrange{0}{125}{\degreeCelsius} & Pa
 Lower time than exhaustive sweep & Not established & Caching and hierarchical rejection reduce avoidable SPICE work, but no complete brute-force sweep or statistically powered time-to-solution comparison is available. \\
 Near-optimal solution & Not established & The repository demonstrates feasible designs, not an optimum or bounded optimality gap. \\
 Zero human intervention & Demonstrated per configured run & Once dependencies, target, channel, budget, and scope are configured, the pipeline runs and reports without manual sizing. Environment and experiment setup still require an operator. \\
-LLM interaction bonus & Not verified in this checkout & The current repository provides structured numeric target entry and a graphical dashboard. Project slides describe an LLM wrapper, but no corresponding wrapper module is present in the reviewed source tree; the bonus is therefore not claimed here. \\
+LLM interaction bonus & Implemented / included in repository & The repository includes a recovered LLM wrapper under \code{report\_generation/llm\_wrapper/}, together with the wrapper implementation, provider handling, target parsing, tests, examples, and documentation. The wrapper acts as a formatting and orchestration layer: it extracts supported numerical constraints from natural-language requests, validates the parsed settings, constructs the pipeline command, and delegates actual circuit evaluation to the existing backend. It does not independently perform SPICE simulation or circuit validation. \\
 \bottomrule
 \end{longtable}
 
@@ -75,8 +75,8 @@ screenshot. The submission should therefore include:
 \end{enumerate}
 
 The current repository contains much of the necessary instrumentation, but not
-all of the decisive competition evidence. In particular, exhaustive-sweep
-speedup, multi-seed optimizer efficiency, complete five-corner PVT, and total
-area remain open. A source-backed LLM wrapper also remains to be included if it
-is to be judged as a bonus deliverable. These are reported as gaps rather than
-inferred from partial measurements.
+all of the decisive competition evidence. The LLM wrapper is included as a bonus
+deliverable, while exhaustive-sweep speedup, multi-seed optimizer efficiency,
+complete five-corner PVT, and total area remain open. An end-to-end real-SPICE
+demonstration starting from natural language should still be recorded if the
+bonus deliverable is to carry experimental rather than source-level evidence.

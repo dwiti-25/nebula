@@ -34,10 +34,12 @@ the one fair recorded budget, PPO did not find a feasible candidate.
   \item[Reproducibility.] Several results are historical. A clean commit,
   complete command line, model identity, and machine information should be
   captured for the final submission run.
-  \item[Interface completeness.] The current source tree contains a structured
-  web UI but not the LLM wrapper described in presentation material. The bonus
-  deliverable should not be claimed unless its source, tests, and runnable entry
-  point are included.
+  \item[Language-interface validity.] The wrapper's parsing, fallback,
+  subprocess construction, and result propagation are unit-tested without a
+  live provider or SPICE run. No claim is made that natural-language input
+  improves optimization quality, and operator-selected run settings are not
+  inferred from prose. A preserved real-SPICE wrapper transcript remains useful
+  submission evidence.
 \end{description}
 
 \section{Recommended next work}

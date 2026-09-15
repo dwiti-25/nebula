@@ -15,6 +15,13 @@ the analysis layer returns electrical metrics, failures, and provenance. The
 framework targets a \SI{5}{Gb/s} signaling context corresponding to PCIe Gen~2,
 but it does not claim protocol or compliance certification \citep{pcieOverview}.
 
+\begin{quote}
+\textbf{Naming convention.} The product developed by the team is named
+\emph{Nebula}. The competition is also named the \emph{Astera Labs Nebula
+Competition}. To prevent ambiguity, this report uses ``Nebula'' for the project
+product and writes ``Nebula Competition'' whenever it refers to the competition.
+\end{quote}
+
 The project source is available at
 \href{\projecturl}{\texttt{github.com/dwiti-25/nebula}}. The repository is the
 authoritative source for implementation behavior; this report distinguishes
@@ -34,8 +41,8 @@ The principal engineering contributions are:
         and provenance fingerprints;
   \item PPO, Random Search, and CEM candidate generation under a shared
         evaluation framework; and
-  \item command-line and local web interfaces for training, inference,
-        qualification, run-graph inspection, and artifact export.
+  \item command-line, local web, and natural-language interfaces for training,
+        inference, qualification, run-graph inspection, and artifact export.
 \end{enumerate}
 
 \section{Scope}

@@ -5,7 +5,10 @@ PCIe Gen-2-oriented receiver equalizer. It connects parameterized SKY130 CTLE
 benches, four-port channel processing, behavioral DFE analysis, staged failure
 handling, caching, provenance, and multiple candidate-generation strategies.
 The separation between optimization and evaluation is the project's most
-important architectural contribution.
+important architectural contribution. The natural-language wrapper preserves
+that separation: it translates explicit constraints and formats existing
+pipeline output, while electrical measurements and verdicts remain outside the
+LLM boundary.
 
 Preserved real-SPICE artifacts demonstrate completed PPO training and feasible
 receiver candidates. In the primary completed qualification study,

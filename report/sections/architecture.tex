@@ -72,3 +72,31 @@ parameter vector, strict specification verdicts, raw JSON and JSONL records,
 run-graph JSON/SVG, a parameterized SPICE netlist, a schematic representation,
 and CTLE/behavioral-DFE eye artifacts. These outputs are the appropriate judging
 interface because they connect a visible result to machine-readable evidence.
+
+\section{Natural-language wrapper}
+
+The optional wrapper in \code{nebula/llm\_wrapper.py} is an orchestration and
+reporting layer, not another optimizer or evaluator. It converts a request into
+the four existing \code{TargetSpec} fields: eye width, locked-phase eye height,
+DFE margin, and CTLE power. Explicit units are required where ambiguity would
+otherwise be material; for example, a bare power value is not guessed. Fields
+not mentioned by the user retain the repository's established defaults and are
+identified as such in the report.
+
+Two parsing providers share this contract. The deterministic \code{mock}
+provider uses local regular expressions and requires neither a network nor an
+API key. The optional \code{anthropic} provider requests structured output and
+falls back to the deterministic parser on import, authentication, network, or
+response-validation failure. The selected provider and any fallback reason are
+shown to the operator. This fallback improves availability, not circuit quality.
+
+After parsing, the wrapper constructs an argument vector for
+\code{experiments.run\_autockt\_pipeline} and executes it as a subprocess.
+Backend, PPO version, checkpoint, episode count, horizon, PVT set, and optional
+HD3/noise measurement are explicit command-line settings rather than inferred
+from prose. The wrapper copies selected parameters and specification rows from
+the pipeline JSON without recalculating them. Synthetic results, an untrained
+policy, missing optional measurements, provider fallback, pipeline failure, and
+the absence of a feasible design are reported explicitly. Thus the LLM is an
+input convenience layer; SPICE and deterministic assessment remain the source
+of every electrical claim.

@@ -22,6 +22,10 @@ Path & Purpose \\
 \code{rl/target\_spec.py} & Target fields and assessment directions. \\
 \code{experiments/run\_autockt\_pipeline.py} & End-to-end candidate generation, selection, and export. \\
 \code{experiments/web\_ui.py} & Local browser interface and subprocess orchestration. \\
+\code{nebula/llm\_wrapper.py} & Natural-language CLI, pipeline invocation, and conservative result formatting. \\
+\code{nebula/llm\_providers.py} & Optional Anthropic provider and deterministic disclosed fallback. \\
+\code{nebula/target\_parsing.py} & Unit-aware mapping from explicit text constraints to \code{TargetSpec}. \\
+\code{tests/test\_llm\_wrapper.py} & SPICE-free tests of parsing, fallback, argument propagation, checkpoint errors, and non-fabrication behavior. \\
 \code{analysis/final\_specification.py} & PASS/FAIL/NOT EVALUATED specification output. \\
 \code{results/v3\_tt\_1000\_summary.json} & Recorded v3 training summary. \\
 \path{results/web_ui_runs/07acbcab1cd346cca24eab31919496c0.json} & Primary completed 27-condition qualification artifact. \\

@@ -74,11 +74,54 @@ channel, PVT scope, and optional final measurements. ``None'' is nominal-only;
 hours. Preserve the generated JSON, event log, graph, schematic, and eye
 artifact for every result quoted in a report.
 
-The reviewed UI accepts four structured numeric target fields. It is not a
-natural-language interface. If an LLM wrapper is added later, it should only map
-text to a validated \code{TargetSpec} and pipeline configuration; all electrical
-verdicts must continue to come from the simulator and deterministic assessment
-code.
+The web UI accepts four structured numeric target fields. The separate wrapper
+below provides the natural-language entry point; both interfaces ultimately use
+the same pipeline and assessment code.
+
+\section{Use the natural-language wrapper}
+
+For an offline, deterministic demonstration with no API key, run:
+
+\begin{lstlisting}[language=bash]
+python -m nebula.llm_wrapper \
+  "Find a receiver with eye width above 0.4 UI, \
+  eye height above 0.1 V, and power below 15 mW." \
+  --llm-provider mock --backend synthetic \
+  --rl-version v3 --episodes 3 --horizon 4
+\end{lstlisting}
+
+For real electrical evaluation, supply a compatible checkpoint and request the
+desired verification scope explicitly:
+
+\begin{lstlisting}[language=bash]
+python -m nebula.llm_wrapper \
+  "Find a receiver with eye width above 0.4 UI, \
+  eye height above 0.1 V, and power below 15 mW." \
+  --llm-provider mock --backend real \
+  --checkpoint results/ppo_v3_tt_1000_policy.pt \
+  --rl-version v3 --pvt-condition-set minimal27 \
+  --measure-hd3-noise --output wrapper_result.json
+\end{lstlisting}
+
+The default provider is \code{anthropic}; it needs the optional dependency in
+\code{report\_generation/llm\_wrapper/requirements.txt} and provider
+credentials. If it cannot run or returns invalid structured data, the wrapper
+uses the deterministic parser and prints the fallback reason. Use
+\code{--llm-provider mock} for reproducible judging. Natural language currently
+controls only the four numeric targets. Backend, checkpoint, PPO version, PVT
+scope, and measurement flags must be passed explicitly. Synthetic output is a
+software-path check, not a circuit measurement.
+
+The wrapper report includes the parsed target, which fields were explicit,
+provider/fallback status, run configuration, selected parameters, the pipeline's
+specification rows, and warnings. It reports no parameters or measurements when
+the pipeline selects no feasible design; it does not invent missing results.
+
+Run its isolated tests with:
+
+\begin{lstlisting}[language=bash]
+python -m unittest tests.test_llm_wrapper -v
+\end{lstlisting}
 
 \section{Build this report}
 

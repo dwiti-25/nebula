@@ -1,8 +1,11 @@
 \chapter*{Abstract}
 \addcontentsline{toc}{chapter}{Abstract}
 
-Nebula is a simulation-in-the-loop framework developed for the Astera Labs
-Nebula Competition problem statement, ``AI/ML for Analog Design.'' It explores the design space of a
+The project product, \emph{Nebula}, is a simulation-in-the-loop framework
+developed for the Astera Labs \emph{Nebula Competition} problem statement,
+``AI/ML for Analog Design.'' The shared name is intentional: throughout this
+report, ``Nebula'' denotes the project product unless ``Nebula Competition'' is
+written explicitly. The project explores the design space of a
 PCI Express Generation~2 oriented receiver equalizer. The implemented signal
 path combines a parameterized SKY130 source-degenerated continuous-time linear
 equalizer (CTLE), a file-driven four-port S-parameter channel, and a behavioral
@@ -14,7 +17,10 @@ and third-harmonic distortion analyses using ngspice.
 The project contributes a reusable circuit-evaluation interface, explicit
 failure semantics, content-addressed caching, provenance records, versioned PPO
 state and reward formulations, checkpoint handling, and optional process,
-voltage, and temperature (PVT) qualification. Recorded real-SPICE artifacts show
+voltage, and temperature (PVT) qualification. A thin natural-language wrapper
+maps explicit user constraints into the existing four-field target schema and
+then invokes the same pipeline; it does not generate or validate electrical
+results itself. Recorded real-SPICE artifacts show
 that the pipeline can produce nominally feasible candidates. Selected design
 \code{pipeline\_ep0} passed all 27 conditions in the demonstrated reduced
 TT/SS/FF PVT grid at 512-bit candidate fidelity using the public IEEE/IBM
@@ -34,4 +40,4 @@ elements and an ideal tail-current source, and post-layout, jitter, mismatch,
 BER, total-area, and total-power signoff remain future work.
 
 \textbf{Keywords:} analog design automation, CTLE, DFE, reinforcement learning,
-PPO, ngspice, SKY130, PVT analysis.
+PPO, natural-language interface, ngspice, SKY130, PVT analysis.
