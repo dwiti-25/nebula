@@ -1,0 +1,74 @@
+\chapter{System Architecture}
+
+Nebula separates candidate generation from electrical evaluation. The optimizer
+does not estimate circuit performance itself: it submits a parameter vector and
+receives a typed evaluation result. This boundary permits PPO, Random Search,
+and CEM to share the same simulator and metric definitions.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{receiver-signal-path.pdf}
+  \caption{Implemented receiver signal path. A differential \SI{5}{Gb/s} NRZ
+  stimulus is filtered by a four-port channel and applied to the
+  transistor-level SKY130 CTLE. The one-tap DFE operates on sampled CTLE output
+  values in software. Its feedback subtracts the previous decision, weighted by
+  the optimized tap $b_1$, before the current decision is made. The dashed DFE
+  boundary is behavioral and must not be interpreted as a transistor schematic.}
+  \label{fig:signal-path}
+\end{figure}
+
+As shown in \cref{fig:signal-path}, the electrical and behavioral portions have
+different validation strength. The CTLE waveform comes from ngspice. Channel
+filtering and DFE processing are numerical models. The recovered decisions are
+therefore appropriate for design-space exploration but do not include sampler
+noise, comparator offset, metastability, feedback delay, or clock jitter.
+
+\section{Software layers}
+
+\begin{description}
+  \item[Simulation layer.] \code{simulator/} renders benches, launches ngspice,
+  parses outputs, validates S-parameters, filters waveforms, and calculates
+  receiver metrics.
+  \item[Optimization layer.] \code{rl/} defines parameter grids, state and
+  reward schemas, PPO models, checkpoints, and the environment contract.
+  \item[Experiment layer.] \code{experiments/} supplies training, evaluation,
+  search, qualification, and web-interface entry points.
+  \item[Analysis layer.] \code{analysis/} builds specification tables,
+  comparisons, qualification summaries, plots, and design catalogs.
+\end{description}
+
+The primary receiver API is \code{simulator.receiver.evaluate\_receiver()}.
+It returns success status, the first failed stage, combined metrics, per-stage
+records, warnings, provenance, runtime, and cache identity.
+
+\section{Traceability and failure handling}
+
+Every expensive evaluation is associated with the circuit parameters,
+conditions, channel and port map, model files, ngspice identity, metric schema,
+and implementation fingerprints. Hard failures stop later work; execution
+failures remain distinguishable from deterministic constraint failures. This is
+important because a missing measurement must never be interpreted as a passing
+value.
+
+\section{Dashboard and generated deliverables}
+
+The local web interface is a thin controller over the same command-line pipeline
+rather than a second evaluator. It provides structured numeric target fields,
+backend and PPO-version selection, checkpoint discovery, channel and port-map
+configuration, PVT scope, and optional final HD3/noise and eye generation. It
+launches each run in a subprocess so a simulator or numerical failure does not
+silently corrupt the server state.
+
+Recorded events can be transformed into a bounded SVG run graph whose nodes
+represent configuration, targets, checkpoints, candidates, simulator stages,
+cache origins, failures, selection, qualification conditions, and artifacts.
+The browser view is intentionally abbreviated for large runs; downloadable JSON
+retains the complete record. Per-run plots cover reward, strict success, losses,
+entropy, electrical metrics, failure stages, and evaluation latency. Missing
+measurements appear as gaps rather than zero-valued points.
+
+For a successfully selected design, the output set can include the final
+parameter vector, strict specification verdicts, raw JSON and JSONL records,
+run-graph JSON/SVG, a parameterized SPICE netlist, a schematic representation,
+and CTLE/behavioral-DFE eye artifacts. These outputs are the appropriate judging
+interface because they connect a visible result to machine-readable evidence.

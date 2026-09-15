@@ -1,0 +1,50 @@
+\chapter{Receiver and Channel Models}
+
+\section{Continuous-time linear equalizer}
+
+The CTLE is a matched NMOS differential pair with resistive loads, parallel
+source-degeneration resistance and capacitance, and an ideal tail-current
+source. Its tunable quantities are $R_{\mathrm{LOAD}}$, $R_{\mathrm{DEG}}$,
+$C_{\mathrm{DEG}}$, $I_{\mathrm{TAIL}}$, and, in the expanded v3 schema, MOS
+width, length, and multiplier. The differential circuit is electrically
+inverting, so the benches define the logical output polarity consistently.
+
+At low frequency, $C_{\mathrm{DEG}}$ is approximately open and
+$R_{\mathrm{DEG}}$ reduces effective transconductance. At increasing frequency,
+the capacitor bypasses part of the degeneration and raises the effective gain.
+The zero is approximately
+\begin{equation}
+  f_z \approx \frac{1}{2\pi R_{\mathrm{DEG}}C_{\mathrm{DEG}}}.
+\end{equation}
+The complete response also depends on transistor transconductance, output
+resistance, load resistance, parasitic capacitance, and the operating point.
+Consequently, this expression explains the tuning direction but does not replace
+the simulated transfer function.
+
+The current Stage~1 model uses ideal resistors, capacitors, and a tail-current
+source. Its computed MOS channel area is only a partial geometry measure; no
+total receiver area is claimed.
+
+\section{Four-port channel}
+
+\code{simulator/channel.py} parses Touchstone 1.x four-port data, supports
+RI, magnitude-angle, and dB-angle formats, and constructs the differential
+transfer $S_{dd21}$. Before transient filtering, the channel is checked for port
+mapping, monotonic frequency data, reference impedance, bandwidth, passivity,
+and causal behavior. The public development channel and the included synthetic
+regression channel are useful test inputs, but neither constitutes PCI-SIG
+compliance evidence.
+
+\section{Behavioral one-tap DFE}
+
+For sampled CTLE output $y[n]$, tap $b_1$, and previous decision
+$\hat d[n-1]\in\{-1,+1\}$, the DFE uses
+\begin{equation}
+  u[n] = y[n] - b_1\hat d[n-1], \qquad
+  \hat d[n] = \operatorname{sign}(u[n]).
+\end{equation}
+The implementation first trains or selects a sampling phase, then evaluates
+locked-phase eye height, contiguous eye width, decision margin, and observed
+errors. Percentile-based vertical metrics reduce sensitivity to single-sample
+outliers. The model does not simulate the physical feedback amplifier, slicer,
+clock path, or adaptation circuitry.

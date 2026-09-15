@@ -1,0 +1,25 @@
+\chapter{Conclusion}
+
+Nebula implements a coherent simulation-in-the-loop framework for exploring a
+PCIe Gen-2-oriented receiver equalizer. It connects parameterized SKY130 CTLE
+benches, four-port channel processing, behavioral DFE analysis, staged failure
+handling, caching, provenance, and multiple candidate-generation strategies.
+The separation between optimization and evaluation is the project's most
+important architectural contribution.
+
+Preserved real-SPICE artifacts demonstrate completed PPO training and feasible
+receiver candidates. In the primary completed qualification study,
+\code{pipeline\_ep0} passed 27/27 TT/SS/FF conditions at 512-bit candidate
+fidelity on the public IEEE/IBM development channel. The result establishes the
+value of explicit qualification but remains specific to the recorded channel,
+model, reduced corner grid, fidelity, and finite stimulus.
+
+The available comparison does not show PPO outperforming Random Search or CEM.
+The fair single-seed trial produced one success for Random Search and none for
+PPO or CEM. The defensible conclusion is therefore that PPO is integrated and
+trainable, not that it is the best optimizer for this problem.
+
+Nebula should be viewed as a well-instrumented Stage~1 research platform. A
+physical DFE, complete PVT coverage, layout-aware devices, statistical
+verification, and compliance-oriented validation are required before stronger
+receiver-level claims can be made.

@@ -1,0 +1,50 @@
+\chapter{Discussion and Limitations}
+
+\section{Engineering interpretation}
+
+Nebula's main achievement is the evaluation contract around the circuit, not a
+claim that reinforcement learning has solved analog sizing. Candidate generation
+is replaceable, while simulation, validation, and reporting retain the same
+meaning. Early stopping reduces wasted simulation time, and structured failures
+give an optimizer more useful information than a single binary outcome.
+
+The completed 27-corner run demonstrates that nominal filtering and qualification
+are separate steps: the design was first selected nominally and then reevaluated
+across the reduced grid. The optimizer comparison also shows that a sophisticated
+method should not be credited merely for being present in the pipeline. Under
+the one fair recorded budget, PPO did not find a feasible candidate.
+
+\section{Threats to validity}
+
+\begin{description}
+  \item[Model validity.] The DFE is behavioral; the CTLE tail source and passive
+  components are ideal; sampler, clock, package, and adaptation circuits are
+  absent.
+  \item[External validity.] The demonstrated 27-condition result uses the public
+  IEEE/IBM development channel, not a certified PCIe compliance fixture.
+  \item[Physical validity.] There is no extracted layout, DRC/LVS closure,
+  mismatch or Monte Carlo study, or silicon correlation.
+  \item[Measurement validity.] HD3 is evaluated at a \SI{100}{MHz} fundamental,
+  outside the intended \SIrange{1.25}{2.5}{GHz} peaking band. Finite-pattern
+  zero-error results are not BER measurements.
+  \item[Statistical validity.] The matched optimizer comparison contains one
+  seed and 20 evaluations per method.
+  \item[Qualification validity.] \SI{75}{\degreeCelsius}, SF, and FS are defined
+  in the extended grid but absent from the demonstrated 27-condition artifact.
+  \item[Reproducibility.] Several results are historical. A clean commit,
+  complete command line, model identity, and machine information should be
+  captured for the final submission run.
+  \item[Interface completeness.] The current source tree contains a structured
+  web UI but not the LLM wrapper described in presentation material. The bonus
+  deliverable should not be claimed unless its source, tests, and runnable entry
+  point are included.
+\end{description}
+
+\section{Recommended next work}
+
+The next phase should implement a transistor-level sampler and DFE, replace
+ideal components with PDK-backed devices, revisit the HD3 stimulus frequency,
+complete a clean 60-condition qualification, and perform post-layout analysis.
+Optimizer claims require matched multi-seed experiments with enough evaluations
+to resolve the low feasible-design rate. Each comparison should report both
+simulation count and wall-clock cost.

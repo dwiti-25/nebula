@@ -1,0 +1,56 @@
+\chapter{Simulation and Evaluation Methodology}
+
+The evaluator is hierarchical: inexpensive checks reject invalid candidates
+before costly transient and qualification work. \Cref{fig:optimization-flow}
+shows the complete search and verification boundary.
+
+\begin{figure}[p]
+  \centering
+  \includegraphics[width=\textwidth,height=0.82\textheight,keepaspectratio]{optimization-flow.pdf}
+  \caption{Candidate search, selection, and verification flow. PPO changes
+  bounded parameter-grid indices and receives metrics from the common staged
+  evaluator. Exact cache hits reuse deterministic results. Candidate generation
+  is followed by strict nominal filtering; optional PVT and final-fidelity
+  checks occur only after a feasible design exists. Training saves a policy,
+  while inference keeps policy weights fixed.}
+  \label{fig:optimization-flow}
+\end{figure}
+
+\section{Evaluation stages}
+
+\begin{table}[htbp]
+\centering
+\caption{Principal stages of a receiver evaluation.}
+\label{tab:stages}
+\begin{tabularx}{\textwidth}{@{}l X X@{}}
+\toprule
+Stage & Purpose & Representative outputs \\
+\midrule
+Validation & Check parameters, files, models, and conditions & Structured setup failure \\
+DC & Establish bias, balance, common mode, and headroom & CTLE power and operating point \\
+AC & Characterize differential transfer & Peaking, peak frequency, group delay \\
+CTLE transient & Reject gross swing or rail violations & Input/output swing \\
+Channel & Validate and characterize the S4P network & Loss, delay, passivity, causality \\
+Noise & Integrate input-referred noise & RMS noise from \SI{10}{MHz}--\SI{5}{GHz} \\
+HD3 & Fit the harmonic content of a sine response & Third-to-fundamental ratio \\
+Receiver transient & Evaluate the channel-driven CTLE and DFE & Eye, margin, errors, transient power \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Fidelity levels}
+
+Screening runs DC, AC, and a short channel-free diagnostic. Training adds the
+channel and a 128-bit receiver evaluation. Candidate fidelity uses 512 bits and
+enables noise and one-amplitude HD3. Final fidelity uses a 1024-bit request and
+additional HD3 amplitudes. The number of useful post-warm-up bits can be smaller
+than the requested sequence; result tables should therefore report the recorded
+\code{simulated\_bits} value rather than infer it from the fidelity name.
+
+\section{Caching and provenance}
+
+The content-addressed cache is valid only when the complete evaluation identity
+matches. The identity includes design parameters, environment conditions,
+channel checksum and port map, model and bench checksums, schema versions, and
+simulator configuration. Retryable execution failures are not treated as valid
+cached circuit results.

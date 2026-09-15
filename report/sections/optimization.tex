@@ -1,0 +1,135 @@
+\chapter{PPO Formulation and Version Evolution}
+
+Nebula's PPO subsystem evolved through three versioned formulations with
+explicit compatibility checks, so changes to the state, reward, and design space
+could be evaluated without silently changing historical checkpoints. All versions use separate two-layer, 64-unit tanh policy
+and value networks, generalized advantage estimation with $\gamma=0.99$ and
+$\lambda=0.95$, PPO clipping $\epsilon=0.2$, and entropy coefficient 0.01
+\citep{schulman2017ppo,schulman2016gae}. Each parameter has an independent
+categorical action head whose default choices map to grid-index deltas
+$\{-1,0,+2\}$, clipped at the grid boundaries.
+
+\section{PPO v1: AutoCkt-style baseline}
+
+PPO v1 established the first end-to-end RL-to-SPICE path. Its five variables are
+$R_{\mathrm{LOAD}}$, $R_{\mathrm{DEG}}$, $C_{\mathrm{DEG}}$,
+$I_{\mathrm{TAIL}}$, and the behavioral DFE tap. Each uses a 21-point grid. An
+action updates parameter index $i$ according to
+\begin{equation}
+  k_{i,t+1}=\operatorname{clip}\!\left(k_{i,t}+\Delta_{i,t},0,N_i-1\right),
+  \qquad \Delta_{i,t}\in\{-1,0,+2\}.
+\end{equation}
+
+The 13-dimensional state contains four signed relative errors between achieved
+and requested targets, four target-to-reference descriptors, and five normalized
+parameter indices. The target metrics are locked-phase DFE eye height, DFE eye
+width, DFE decision margin, and CTLE power.
+
+The reward follows the AutoCkt-style rule \citep{wang2020autockt}: only
+unsatisfied relative errors contribute negative values, and a design within the
+terminal tolerance receives 10. Nebula adds an explicit $-1$ result for simulator
+failure instead of allowing absent output to crash the environment.
+
+V1 proved that PPO actions could drive parameterized SPICE evaluations, but it
+exposed two information problems. Reset built an observation from zero-filled
+metrics rather than evaluating the starting circuit. In addition, all early
+failures received the same $-1$ reward. In the fair no-warm-start real-SPICE
+comparison, all 20 PPO trials failed at DC and produced identical reward, leaving
+no signal to distinguish their actions.
+
+\section{PPO v2: valid observations and informative failures}
+
+PPO v2 was developed as an additive correction while retaining v1 state, reward,
+action, and checkpoint behavior for reproducibility.
+
+First, optional \emph{evaluated reset} simulates the initial circuit so the first
+observation represents a genuine result. It costs one evaluation per episode but
+removes the artificial-zero state. Second, the 28-dimensional v2 state retains
+the 13 v1 entries and adds one validity flag, early-stage CTLE-power and
+AC-peaking information, and a 12-way one-hot failure-stage code. The policy can
+therefore distinguish setup, DC, AC, channel, and transient outcomes. Missing
+receiver metrics are never silently interpreted as measured zeros.
+
+Third, structured reward v2 gives an uninformative early failure a structural
+floor of $-20$, below every valid graded design. Where genuine measurements
+exist, individual target components and early-stage margins provide distance
+information. A strict pass receives the terminal bonus plus a bounded overshoot
+bonus capped at 2. The result separately records the legacy tolerance-based
+terminal criterion and the exact strict target verdict.
+
+V2 also added safe full checkpoints containing policy/value weights, optimizer
+state, Python/NumPy/PyTorch RNG states, counters, hyperparameters, grids, target
+IDs, schema versions, and Git identity. Incompatible schemas are rejected before
+weights are loaded. Versioned step/update events record actions, boundary
+clipping, metrics, failures, rewards, losses, entropy, and evaluation count.
+
+The changes were tested in a 20-seed synthetic ablation from an infeasible
+corner. Strict satisfaction was 0/20 for every variant at the small budget, so
+the experiment does not prove circuit improvement. Under a uniform looser
+criterion, corrected reset did not regress relative to v1 (3 wins, 17 ties), the
+validity-aware state beat v1 in 13/20 seeds, and the full reward-v2 stack beat v1
+in 15/20 seeds. Symmetric $\{-1,0,+1\}$ actions were worse in all 20 seeds and
+were rejected. These are synthetic software-landscape results; no large
+real-SPICE PPO v2 study was completed.
+
+\section{PPO v3: expanded sizing and runtime contract}
+
+PPO v3 builds on v2's failure semantics while expanding the design space from
+five to eight variables. It adds matched MOS width $W$, length $L$, and integer
+multiplier $M$. Both input transistors always share geometry, preserving the
+matched-pair invariant. V3 has eight categorical action heads and retains the
+$\{-1,0,+2\}$ grid deltas. The multiplier remains integer-valued through action
+decoding, serialization, and SPICE rendering.
+
+The frozen v3 state has 52 components: target errors and references; eight
+normalized indices; diagnostic values and their validity flags; evaluator-stage
+identity; channel loss at \SIlist{1.25;2.5;5}{GHz} and bulk delay; partial MOS
+channel-area context; and an explicit false total-area-valid flag. Channel
+features prevent evaluation on a new channel from appearing identical to the
+training environment.
+
+Reward v3 begins with reward v2 and tightens termination. Success requires a
+successful evaluation, all four targets, peaking inside \SIrange{3}{12}{dB}, and
+zero observed DFE errors. A weight-0.02 regularizer favors smaller matched-MOS
+channel area when available. It cannot override feasibility and cannot establish
+the competition's total-area requirement.
+
+V3 checkpoints bind the policy to the ordered eight-parameter registry, exact
+grids, channel checksum and port map, backend, fidelity, toolchain, and schema
+versions. A five-head v1/v2 checkpoint cannot load as v3. The registry is shared
+with Random Search, CEM, PVT, schematic export, and the UI.
+
+The preserved v3 summary records a completed real-backend run with seed 101,
+100 updates, and 692 evaluations. This demonstrates expanded-agent integration
+with real SPICE. It does not prove v3 superior to v2, arbitrary-start convergence,
+or near-optimality.
+
+\section{Version comparison}
+
+\begin{table}[htbp]
+\centering
+\caption{Technical evolution of PPO in Nebula.}
+\label{tab:ppo-versions}
+\begin{tabularx}{\textwidth}{@{}l c c X X@{}}
+\toprule
+Version & State & Heads & Main development & Evidence boundary \\
+\midrule
+v1 & 13 & 5 & First AutoCkt-style RL-to-SPICE baseline & End-to-end operation; flat early-failure reward exposed \\
+v2 & 28 & 5 & Evaluated reset, validity/failure state, structured reward, resumable checkpoints & Multi-seed synthetic ablation; no large real-SPICE v2 proof \\
+v3 & 52 & 8 & MOS $W/L/M$, channel context, stricter termination, partial-area regularizer & Real-backend artifact; no proven v2/v3 superiority \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The progression is best understood as closure of the automation contract: v1
+connected PPO to SPICE, v2 repaired information quality and reproducibility, and
+v3 expanded physical sizing and bound downstream tools to a common identity.
+
+\section{Random Search and CEM}
+
+Random Search draws independent bounded candidates. CEM updates a distribution
+toward an elite subset. Both use the same target and receiver evaluator as PPO.
+A fair comparison must control evaluation count, time, seed, initialization,
+target, channel, fidelity, and success definition. PPO is sequential and
+grid-local, whereas the baselines can make global continuous draws; that
+structural difference must accompany any short-horizon result.

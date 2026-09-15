@@ -1,0 +1,9 @@
+{
+  "generated_without_simulation": true,
+  "sources": {
+    "ppo-v3-training-overview": "results\\v3_tt_1000_training.jsonl",
+    "ppo-v3-parameter-trajectory": "results\\v3_tt_1000_training.jsonl",
+    "optimizer-comparison": "results\\benchmark_report.json",
+    "evaluation-efficiency": "docs/RL_RUNTIME_EFFICIENCY.md, controlled 20-seed study"
+  }
+}

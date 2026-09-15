@@ -1,0 +1,49 @@
+\chapter{Introduction}
+
+High-speed serial links suffer frequency-dependent channel loss that closes the
+received eye and reduces the decision margin. Receiver equalization restores
+useful high-frequency content before sampling. For a CTLE, the relevant design
+variables interact: greater peaking may improve the eye after a lossy channel,
+but can also increase noise, reduce headroom, or create an undesirable response.
+Manual exploration becomes costly when every candidate must pass several SPICE
+analyses and multiple operating conditions.
+
+Nebula investigates whether a structured optimization loop can automate this
+exploration. A candidate generator proposes circuit and DFE parameters; the
+simulation layer converts the proposal into parameterized ngspice benches; and
+the analysis layer returns electrical metrics, failures, and provenance. The
+framework targets a \SI{5}{Gb/s} signaling context corresponding to PCIe Gen~2,
+but it does not claim protocol or compliance certification \citep{pcieOverview}.
+
+The project source is available at
+\href{\projecturl}{\texttt{github.com/dwiti-25/nebula}}. The repository is the
+authoritative source for implementation behavior; this report distinguishes
+implemented functionality from historical experimental evidence.
+
+\section{Contributions}
+
+The principal engineering contributions are:
+\begin{enumerate}
+  \item a parameterized SKY130 CTLE and separate DC, AC, transient, noise, and
+        HD3 ngspice benches;
+  \item a four-port Touchstone channel path with explicit differential port
+        mapping and validation;
+  \item a behavioral one-tap DFE with phase selection, eye-opening, margin, and
+        finite-pattern error metrics;
+  \item a staged evaluator with early rejection, caching, structured failures,
+        and provenance fingerprints;
+  \item PPO, Random Search, and CEM candidate generation under a shared
+        evaluation framework; and
+  \item command-line and local web interfaces for training, inference,
+        qualification, run-graph inspection, and artifact export.
+\end{enumerate}
+
+\section{Scope}
+
+Nebula evaluates a Stage~1 schematic model. Its transistor-level component is
+the CTLE. The channel is represented by measured or synthetic S-parameters, and
+the DFE is evaluated in Python after the CTLE transient simulation. The system
+does not contain a transistor-level sampler, clock-data recovery, physical DFE,
+layout parasitics, package model, or protocol checker. Consequently, successful
+evaluation means that the executed project-defined checks passed; it does not
+establish production readiness or standards compliance.

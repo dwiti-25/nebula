@@ -1,0 +1,48 @@
+\chapter{Reproducibility Checklist}
+\label{app:reproducibility}
+
+Before publishing or updating a numerical result, record the following:
+
+\begin{enumerate}
+  \item repository URL, branch, exact commit, and dirty-tree status;
+  \item Python and dependency versions;
+  \item ngspice executable, version, solver, and timeout;
+  \item SKY130 model root, selected corner model, and checksums;
+  \item complete circuit parameter vector and schema version;
+  \item target specification and metric directions;
+  \item channel path, checksum, reference impedance, and port map;
+  \item optimizer, seed, initialization, horizon, and evaluation budget;
+  \item fidelity, requested bit count, and recorded useful bit count;
+  \item PVT condition set and whether early stopping was enabled; and
+  \item paths and SHA-256 hashes for JSON, JSONL, checkpoint, schematic,
+        waveform-derived, graph, and image artifacts.
+\end{enumerate}
+
+Recommended repository snapshot commands are:
+
+\begin{lstlisting}[language=bash]
+git rev-parse HEAD
+git status --short
+python --version
+python -m pip freeze
+ngspice --version
+\end{lstlisting}
+
+The report should use dated phrases such as ``the 2026-09-13 recorded run'' in
+place of unstable descriptions such as ``current,'' ``live,'' or ``fresh.''
+
+\section{Suggested judging demonstration}
+
+A concise live sequence is:
+\begin{enumerate}
+  \item show the target, PPO version, checkpoint, channel, seed, and budget;
+  \item launch one short real-SPICE nominal run;
+  \item open its selected parameters, specification table, run graph, and raw
+        JSON, then trace one metric to its simulator stage;
+  \item replay the identical request to demonstrate a provenance-safe cache hit;
+  \item show the preserved 27-condition result, naming its candidate, channel,
+        and fidelity;
+  \item show the fair optimizer comparison and explicitly avoid a PPO
+        superiority claim; and
+  \item finish with the compliance matrix and outstanding work.
+\end{enumerate}

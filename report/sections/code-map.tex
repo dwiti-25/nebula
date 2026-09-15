@@ -1,0 +1,31 @@
+\chapter{Code and Artifact Map}
+
+\begin{longtable}{@{}p{0.34\textwidth}p{0.60\textwidth}@{}}
+\caption{Principal implementation and evidence paths.}\label{tab:code-map}\\
+\toprule
+Path & Purpose \\
+\midrule
+\endfirsthead
+\toprule
+Path & Purpose \\
+\midrule
+\endhead
+\code{simulator/receiver.py} & Staged receiver evaluator and failure semantics. \\
+\code{simulator/channel.py} & Touchstone parsing, differential transfer, and channel validation. \\
+\code{simulator/receiver\_metrics.py} & Behavioral one-tap DFE, sampling phase, eye, margin, and error metrics. \\
+\code{simulator/waveform.py} & AC, noise, and harmonic metric extraction. \\
+\code{simulator/provenance.py} & Implementation and model fingerprints. \\
+\code{circuits/blocks/ctle.spice} & Reusable SKY130 differential CTLE subcircuit. \\
+\code{circuits/benches/} & DC, AC, CTLE transient, receiver transient, noise, and HD3 benches. \\
+\code{rl/ppo\_agent.py} & PPO policy and value implementation. \\
+\code{rl/autockt\_env.py} & Optimization environment and transition contract. \\
+\code{rl/target\_spec.py} & Target fields and assessment directions. \\
+\code{experiments/run\_autockt\_pipeline.py} & End-to-end candidate generation, selection, and export. \\
+\code{experiments/web\_ui.py} & Local browser interface and subprocess orchestration. \\
+\code{analysis/final\_specification.py} & PASS/FAIL/NOT EVALUATED specification output. \\
+\code{results/v3\_tt\_1000\_summary.json} & Recorded v3 training summary. \\
+\path{results/web_ui_runs/07acbcab1cd346cca24eab31919496c0.json} & Primary completed 27-condition qualification artifact. \\
+\code{results/benchmark\_report.json} & Warm-started and fair optimizer-comparison records. \\
+\code{results/v3\_tt\_1000\_eye.png} & Repository-backed eye visualization. \\
+\bottomrule
+\end{longtable}

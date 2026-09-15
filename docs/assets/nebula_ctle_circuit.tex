@@ -1,0 +1,72 @@
+\documentclass[tikz,border=8pt]{standalone}
+
+\usepackage[american]{circuitikz}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usetikzlibrary{positioning}
+
+\definecolor{nebulaNavy}{HTML}{0B1930}
+\definecolor{nebulaBlue}{HTML}{56C7FF}
+\definecolor{nebulaViolet}{HTML}{A98BFF}
+
+\begin{document}
+\begin{circuitikz}[
+    line width=0.9pt,
+    color=nebulaNavy,
+    every node/.style={font=\sffamily\footnotesize},
+    voltage shift=0.5
+]
+
+% Fixed canvas bounds retain clear space above the circuit in standalone output.
+\path[use as bounding box] (-4.5,-4.35) rectangle (4.5,7.0);
+
+% Supply rail and resistive loads.
+\draw[nebulaBlue, line width=1.2pt] (-3.3,5.2) -- (3.3,5.2)
+    ;
+
+\draw (-2,5.2) to[R] (-2,3.2)
+    node[circ] (outp) {};
+\draw ( 2,5.2) to[R] ( 2,3.2)
+    node[circ] (outn) {};
+
+\draw (outp) -- (-2,2.7);
+\draw (outn) -- ( 2,2.7);
+
+% Matched SKY130 NMOS differential pair.
+\node[nmos] (M1) at (-2,2.0) {};
+\node[nmos, xscale=-1] (M2) at (2,2.0) {};
+
+\draw (M1.D) -- (outp);
+\draw (M2.D) -- (outn);
+
+\draw[nebulaViolet, line width=1.1pt] (-4.2,2.0)
+    -- (M1.G);
+\draw[nebulaViolet, line width=1.1pt] ( 4.2,2.0)
+    -- (M2.G);
+
+\draw (outp) -- (-3.25,3.2);
+\draw (outn) -- ( 3.25,3.2);
+
+% Separate source nodes used by the implemented CTLE netlist.
+\draw (M1.S) -- (-2,0.8) node[circ] (srcp) {};
+\draw (M2.S) -- ( 2,0.8) node[circ] (srcn) {};
+
+% Each source has its own parallel RDEG || CDEG path to the common tail.
+\draw (srcp) -- (-3,0.8)
+    to[R] (-3,-1.7) -- (0,-1.7);
+\draw (srcp) -- (-1,0.8)
+    to[C] (-1,-1.7);
+
+\draw (srcn) -- (3,0.8)
+    to[R] (3,-1.7) -- (0,-1.7);
+\draw (srcn) -- (1,0.8)
+    to[C] (1,-1.7);
+
+\node[circ] (tail) at (0,-1.7) {};
+
+% Ideal tail-current source used by the current implementation.
+\draw (tail) to[I] (0,-4.0)
+    node[ground] {};
+
+\end{circuitikz}
+\end{document}

@@ -1,0 +1,30 @@
+\chapter{Additional Evidence Figures}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.82\textwidth]{evaluation-efficiency.pdf}
+  \caption{Evaluator-call reduction from the controlled 20-seed synthetic cache
+  study. Identical inputs produced bit-identical trajectories. The figure does
+  not claim a measured real-SPICE wall-clock speedup.}
+  \label{fig:cache-efficiency}
+\end{figure}
+
+\begin{landscape}
+\begin{figure}[p]
+  \centering
+  \includegraphics[width=0.95\linewidth]{pvt27-temperature-trends.png}
+  \caption{Temperature trends across process and supply for the completed
+  reduced 27-condition run. Color identifies process corner and marker shape
+  identifies supply. Only 0, 27, and \SI{125}{\degreeCelsius} were evaluated.}
+  \label{fig:pvt-temperature}
+\end{figure}
+\end{landscape}
+
+\begin{figure}[p]
+  \centering
+  \includegraphics[width=0.96\textwidth,height=0.82\textheight,keepaspectratio]{ppo-v3-parameter-trajectory.pdf}
+  \caption{Eight-parameter policy-step trajectory for the seed-101 v3 run. The
+  traces show explored parameter values against cumulative evaluations; they do
+  not establish causal parameter importance or convergence.}
+  \label{fig:parameter-trajectory}
+\end{figure}

@@ -1,0 +1,161 @@
+\chapter{Results}
+
+\section{Selected design and evaluation contract}
+
+The primary result in this report is run
+\code{07acbcab1cd346cca24eab31919496c0}, which selected
+\code{pipeline\_ep0} using the PVT rank ``most robust.'' The target was
+locked-phase DFE eye height $>\SI{0.1}{V}$, eye width $>0.4$ UI, decision
+margin $>\SI{0}{V}$, and CTLE power $<\SI{15}{mW}$. The run used PPO v3
+checkpoint \code{ppo\_v3\_tt\_1000\_policy.pt}, the IEEE/IBM 20-dB-through
+development channel, port map 1,3,2,4, and candidate-fidelity PVT evaluation.
+
+\begin{table}[htbp]
+\centering
+\caption{Eight parameters of the selected design used in the completed
+27-condition run.}
+\label{tab:selected-design}
+\begin{tabular}{@{}l r l@{}}
+\toprule
+Parameter & Value & Unit \\
+\midrule
+$R_{\mathrm{LOAD}}$ & 2457.143 & $\Omega$ \\
+$R_{\mathrm{DEG}}$ & 485.714 & $\Omega$ \\
+$C_{\mathrm{DEG}}$ & 0.485714 & pF \\
+$I_{\mathrm{TAIL}}$ & 0.670 & mA \\
+Behavioral DFE tap & 57.143 & mV \\
+Matched MOS width $W$ & 10.378 & $\mu$m \\
+Matched MOS length $L$ & 0.150 & $\mu$m \\
+MOS multiplier $M$ & 1 & integer \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The channel checksum is
+\path{ce6002f8663623ebc0992c458c3d518faf79ccfeb65d1ee59c8c638bccd66581}.
+The PVT request contains 512 bits; each corner records 425 useful simulated bits
+after alignment and warm-up. These identifiers are necessary because results
+from other candidates and channels are not interchangeable.
+
+\section{Completed reduced 27-condition PVT run}
+
+All 27 evaluated conditions passed over TT/SS/FF,
+\SIlist{1.71;1.80;1.89}{V}, and \SIlist{0;27;125}{\degreeCelsius}.
+\Cref{fig:pvt-heatmaps} displays the recorded values for every condition.
+
+\begin{landscape}
+\begin{figure}[p]
+  \centering
+  \includegraphics[width=0.98\linewidth]{pvt27-all-metrics-heatmaps.png}
+  \caption{Measured performance across the completed 512-bit, 27-condition
+  candidate-fidelity run. All values come from run \code{07acbcab...}; all 27
+  conditions passed. Power is CTLE power. The DFE metrics are behavioral, and
+  zero finite-pattern errors are not a BER result. This reduced grid excludes
+  \SI{75}{\degreeCelsius}, SF, and FS.}
+  \label{fig:pvt-heatmaps}
+\end{figure}
+\end{landscape}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.96\textwidth]{pvt27-worst-case-spec-margins.png}
+  \caption{Worst recorded corner for each evaluated specification in run
+  \code{07acbcab...}. The plot reports measured values and locations directly;
+  it does not normalize the margins into an aggregate score.}
+  \label{fig:pvt-worst}
+\end{figure}
+
+The worst locked-phase eye height was \SI{1.16620}{V} at FF,
+\SI{1.71}{V}, \SI{125}{\degreeCelsius}; worst eye width was 0.85 UI at the
+same corner; and worst DFE margin was \SI{0.55852}{V}. CTLE power ranged from
+\SI{1.1457}{mW} to \SI{1.2663}{mW}. Input-referred noise ranged from
+\SI{0.328262}{mV RMS} to \SI{0.487290}{mV RMS}. The least favorable HD3
+(largest value) was \SI{-69.6987}{dB} at FF, \SI{1.71}{V},
+\SI{125}{\degreeCelsius}. Peaking remained between 3.18078 and
+\SI{3.75745}{dB}.
+
+These margins demonstrate robust behavior over the reduced grid, but not the
+unmeasured competition corners or physical implementation effects.
+
+\section{CTLE AC response}
+
+\begin{landscape}
+\begin{figure}[p]
+  \centering
+  \includegraphics[width=0.96\linewidth]{ctle-ac-responses-27-corners.png}
+  \caption{Regenerated AC-only ngspice sweeps for the selected design and the 27
+  recorded process/voltage/temperature conditions. The shaded region marks the
+  intended \SIrange{1.25}{2.5}{GHz} peak band and the dashed line marks the
+  \SI{2.5}{GHz} Nyquist frequency. These curves were regenerated from the run
+  configuration; they are not stored transient/noise/HD3 waveforms and do not by
+  themselves prove PVT qualification.}
+  \label{fig:ac-corners}
+\end{figure}
+\end{landscape}
+
+\section{PPO v3 training evidence}
+
+The recorded seed-101 v3 training run completed 100 updates and 692 real-backend
+evaluations. \Cref{fig:ppo-training} shows reward, cumulative satisfying steps,
+and the first failed stage. The dominant AC failures explain why staged
+diagnostics and validity-aware state are important. The curve is one training
+history, not a confidence interval or proof of convergence.
+
+\begin{landscape}
+\begin{figure}[p]
+  \centering
+  \includegraphics[width=0.97\linewidth]{ppo-v3-training-overview.pdf}
+  \caption{PPO v3 real-backend training evidence from
+  \code{v3\_tt\_1000\_training.jsonl}. Reward v3 values must not be compared
+  directly with v1/v2 reward scales. Cumulative satisfying steps are within-run
+  observations, not independent trials.}
+  \label{fig:ppo-training}
+\end{figure}
+\end{landscape}
+
+\section{Fair optimizer comparison}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.78\textwidth]{optimizer-comparison.pdf}
+  \caption{The matched-budget, no-warm-start comparison used one seed and 20
+  evaluations per method. Random Search found one feasible design; CEM and PPO
+  found none. PPO was grid-local while the baselines used continuous draws, so
+  the experiment is insufficient for a general optimizer ranking.}
+  \label{fig:optimizer-comparison}
+\end{figure}
+
+PPO superiority is not demonstrated. The result instead reveals a practical
+reachability limitation under the tested short-horizon configuration.
+
+\section{Evaluation efficiency}
+
+Hierarchical early rejection avoids later stages after a hard failure, while
+exact-key caching avoids repeated identical evaluations. In a controlled
+20-seed synthetic study, caching reduced evaluator calls from 1200 to 1085
+(9.58\%) with bit-identical action and reward trajectories. Synthetic wall-clock
+time fell by only 1.41\% because PPO computation dominated the cheap algebraic
+evaluator. A matched real-SPICE cache timing experiment and an exhaustive
+MOS/R/C/L baseline were not completed; therefore significant real design-time
+speedup and near-optimality remain unproven.
+
+\section{Recorded eye artifact}
+
+\IfFileExists{../results/v3_tt_1000_eye.png}{%
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{v3_tt_1000_eye.png}
+  \caption{Repository-backed eye artifact. The left panel is the continuous
+  transistor-level CTLE output after channel filtering; the right panel contains
+  corrected sample points from the behavioral one-tap DFE. The DFE panel is not
+  a transistor-level waveform, and the finite pattern is not BER evidence.}
+  \label{fig:eye}
+\end{figure}
+}{\emph{The optional eye artifact was not found when this document was built.}}
+
+\section{Result boundary}
+
+The evidence establishes a working, versioned automation pipeline with real
+ngspice in the loop, a completed reduced-grid PVT run, and preserved experiment
+artifacts. It does not establish a complete physical receiver, general PPO
+superiority, full five-corner PVT, PCIe compliance, total area, or near-optimality.

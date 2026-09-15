@@ -169,6 +169,14 @@ def _validate_request(payload: dict[str, Any]) -> list[str]:
         problems.append(f"pvt_condition_set must be one of {PVT_CONDITION_SETS}")
     if payload.get("trade_off_preference") not in TRADE_OFF_PREFERENCES:
         problems.append(f"trade_off_preference must be one of {TRADE_OFF_PREFERENCES}")
+    try:
+        timeout = payload.get("simulator_timeout_seconds", 360)
+        if isinstance(timeout, bool) or not 1 <= float(timeout) <= 3600:
+            raise ValueError
+    except (TypeError, ValueError):
+        problems.append("simulator_timeout_seconds must be between 1 and 3600")
+    if payload.get("pvt_pattern_bits", 512) not in (512, 1024):
+        problems.append("pvt_pattern_bits must be 512 or 1024")
     return problems
 
 
@@ -203,6 +211,8 @@ def _build_argv(payload: dict[str, Any], *, output_path: Path, schematic_path: P
         "--horizon", str(int(payload["horizon"])),
         "--initial-indices-source", payload.get("initial_indices_source", "verified"),
         "--pvt-condition-set", payload["pvt_condition_set"],
+        "--simulator-timeout-seconds", str(payload.get("simulator_timeout_seconds", 360)),
+        "--pvt-pattern-bits", str(payload.get("pvt_pattern_bits", 512)),
         "--trade-off-preference", payload["trade_off_preference"],
         "--channel", channel_path,
         "--channel-ports", *(str(port) for port in channel_ports),
@@ -237,7 +247,8 @@ def _estimate_timeout_s(payload: dict[str, Any]) -> float:
         return RUN_TIMEOUT_S
     episodes = max(1, int(payload.get("episodes", 1)))
     factor = 36 / 27 if payload.get("pvt_condition_set") == "full36" else 1
-    return MINIMAL27_FIXED_OVERHEAD_S + episodes * MINIMAL27_PER_CANDIDATE_S * factor
+    timeout_scale = max(1, float(payload.get("simulator_timeout_seconds", 360)) / 180)
+    return MINIMAL27_FIXED_OVERHEAD_S + episodes * MINIMAL27_PER_CANDIDATE_S * factor * timeout_scale
 
 # ---------------------------------------------------------------------------
 # PVT progress parsing ("Add visible PVT progress to web UI"): the pipeline
@@ -578,8 +589,34 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/evidence":
             self._send_json(200, build_dashboard(PROJECT_ROOT))
         elif path == "/api/evidence/runs":
-            self._send_json(200, {"runs": sorted(p.stem.removesuffix(".events")
-                                                  for p in RUNS_DIR.glob("*.events.jsonl"))})
+            event_runs = {p.stem.removesuffix(".events") for p in RUNS_DIR.glob("*.events.jsonl")}
+            result_runs = {p.stem for p in RUNS_DIR.glob("*.json") if _RUN_ID_RE.fullmatch(p.stem)}
+            self._send_json(200, {"runs": sorted(event_runs | result_runs)})
+        elif path.startswith("/api/result/"):
+            run_id = path[len("/api/result/"):]
+            if not _RUN_ID_RE.fullmatch(run_id):
+                self._send_json(400, {"error": "invalid run_id"})
+                return
+            result_path = RUNS_DIR / f"{run_id}.json"
+            if not result_path.is_file():
+                self._send_json(404, {"error": "no saved result for this run"})
+                return
+            try:
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                self._send_json(500, {"error": f"could not read saved result: {exc}"})
+                return
+            elapsed_s = None
+            graph_path = RUNS_DIR / f"{run_id}.graph.json"
+            if graph_path.is_file():
+                try:
+                    elapsed_s = json.loads(graph_path.read_text(encoding="utf-8")).get("elapsed_s")
+                except (OSError, json.JSONDecodeError):
+                    pass
+            self._send_json(200, {
+                "run_id": run_id, "status": "completed", "elapsed_s": elapsed_s,
+                "stdout_tail": "", "stderr_tail": "", "result": result,
+            })
         elif path.startswith("/api/evidence/"):
             run_id = path[len("/api/evidence/"):]
             if not _RUN_ID_RE.match(run_id):
@@ -803,6 +840,11 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <label for="searchSeconds">Search time budget (seconds; blank = unlimited)</label>
       <input id="searchSeconds" type="number" min="1" placeholder="Unlimited">
+      <label for="simulatorTimeout">PVT / final SPICE timeout per invocation (seconds)</label>
+      <input id="simulatorTimeout" type="number" min="1" max="3600" value="360">
+      <label for="pvtPatternBits">PVT pattern length</label>
+      <select id="pvtPatternBits"><option value="512">512 bits (default)</option><option value="1024">1024 bits (slower; FINAL fidelity)</option></select>
+      <p class="hint">1024-bit PVT also includes three-amplitude HD3 at corners. A selected real design must pass nominal 1024-bit validation in either mode. Training screening is unchanged.</p>
       <label for="maxEvaluations">Evaluation budget (blank = workflow default)</label>
       <input id="maxEvaluations" type="number" min="1" placeholder="Workflow default">
       <label for="workers">Training workers (inference is serial)</label>
@@ -860,7 +902,7 @@ INDEX_HTML = r"""<!doctype html>
       <div id="evidenceSummary" class="param-grid"></div>
       <div id="chartGrid" class="chart-grid" style="margin-top:14px"></div>
       <div id="evidenceMeta" class="evidence-meta">Loading v3 evidence…</div>
-      <label for="runHistory">Recorded run graphs</label>
+      <label for="runHistory">Recorded runs and results</label>
       <select id="runHistory"><option value="">Select a previous run</option></select>
     </div>
     <div id="resultsEmpty">Configure a target and click <strong>Run NEBULA</strong> to see results here.</div>
@@ -878,6 +920,10 @@ INDEX_HTML = r"""<!doctype html>
       <div class="card" id="pvtCard" style="display:none">
         <h2>PVT robustness</h2>
         <div id="pvtSummary"></div>
+        <div style="overflow-x:auto; margin-top:12px">
+          <table><thead><tr><th>Corner</th><th>VDD</th><th>Temp.</th><th>Status</th><th>Peaking</th><th>Eye height</th><th>Eye width</th><th>DFE margin</th><th>Power</th><th>Noise</th><th>HD3</th></tr></thead>
+          <tbody id="pvtRows"></tbody></table>
+        </div>
       </div>
       <div class="card" id="eyeCard" style="display:none">
         <h2>Selected-design eye diagram</h2>
@@ -975,7 +1021,17 @@ fetch('/api/evidence/runs').then(r => r.json()).then(data => {
   for (const id of data.runs) $('runHistory').add(new Option(id, id));
 });
 $('runHistory').addEventListener('change', () => {
-  if ($('runHistory').value) renderRunEvidence($('runHistory').value).catch(err => showError(String(err)));
+  const runId = $('runHistory').value;
+  if (!runId) return;
+  fetch(`/api/result/${runId}`).then(async response => {
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Could not load saved run');
+    setBadge(payload.status);
+    $('elapsed').textContent = payload.elapsed_s == null ? '' : `${payload.elapsed_s.toFixed(1)}s recorded runtime`;
+    $('pvtProgress').textContent = '';
+    renderResult(payload);
+    await renderRunEvidence(runId);
+  }).catch(err => showError(String(err)));
 });
 
 function buildPayload() {
@@ -992,6 +1048,8 @@ function buildPayload() {
     episodes: parseInt($('episodes').value, 10),
     horizon: parseInt($('horizon').value, 10),
     search_seconds: $('searchSeconds').value ? Number($('searchSeconds').value) : null,
+    simulator_timeout_seconds: Number($('simulatorTimeout').value),
+    pvt_pattern_bits: Number($('pvtPatternBits').value),
     max_evaluations: $('maxEvaluations').value ? Number($('maxEvaluations').value) : null,
     workers: Number($('workers').value),
     initial_indices_source: $('initSource').value,
@@ -1093,12 +1151,33 @@ function renderResult(payload) {
   }
 
   const pvt = selected && result.selection.pvt;
+  const pvtRows = $('pvtRows');
+  pvtRows.replaceChildren();
   if (pvt) {
     $('pvtCard').style.display = 'block';
     $('pvtSummary').innerHTML =
       `<div class="param-grid"><div><div class="k">Pass rate</div><div class="v">${pvt.n_passing}/${pvt.n_conditions}` +
       ` (${(pvt.pass_rate*100).toFixed(0)}%)</div></div>` +
       `<div><div class="k">Met minimum</div><div class="v">${pvt.met_minimum_pass_rate}</div></div></div>`;
+    const number = (value, digits, scale=1, suffix='') =>
+      value == null ? 'n/a' : `${(Number(value)*scale).toFixed(digits)}${suffix}`;
+    for (const point of (pvt.points || [])) {
+      const m = point.metrics || {};
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        `<td>${String(point.process_corner || '').toUpperCase()}</td>` +
+        `<td>${number(point.supply_v, 2, 1, ' V')}</td>` +
+        `<td>${number(point.temperature_c, 0, 1, '°C')}</td>` +
+        `<td><span class="${point.success ? 'verdict verdict-PASS' : 'verdict verdict-FAIL'}">${point.success ? 'PASS' : 'FAIL'}</span></td>` +
+        `<td>${number(m.peaking_db, 2, 1, ' dB')}</td>` +
+        `<td>${number(m.dfe_locked_phase_eye_height_v, 3, 1, ' V')}</td>` +
+        `<td>${number(m.dfe_eye_width_ui, 2, 1, ' UI')}</td>` +
+        `<td>${number(m.dfe_min_margin_v, 3, 1, ' V')}</td>` +
+        `<td>${number(m.ctle_power_w, 3, 1000, ' mW')}</td>` +
+        `<td>${number(m.input_referred_noise_vrms, 3, 1000, ' mV')}</td>` +
+        `<td>${number(m.hd3_db, 2, 1, ' dB')}</td>`;
+      pvtRows.appendChild(tr);
+    }
   } else {
     $('pvtCard').style.display = 'none';
   }
@@ -1126,7 +1205,7 @@ function renderResult(payload) {
     `<div><div class="k">Backend</div><div class="v">${result.backend}</div></div>` +
     `<div><div class="k">Channel loss @ 2.5 GHz</div><div class="v">${result.channel ? result.channel.metrics.channel_loss_2p5ghz_db.toFixed(2)+' dB' : 'n/a'}</div></div>` +
     `<div><div class="k">PPO version</div><div class="v">${result.rl_version || 'v1'}</div></div>` +
-    `<div><div class="k">Elapsed</div><div class="v">${payload.elapsed_s}s</div></div>`;
+    `<div><div class="k">Elapsed</div><div class="v">${payload.elapsed_s == null ? 'not recorded' : payload.elapsed_s.toFixed(1)+'s'}</div></div>`;
 
   $('schematicLink').onclick = (e) => {
     e.preventDefault();

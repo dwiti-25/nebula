@@ -1,0 +1,121 @@
+\documentclass[11pt,a4paper]{report}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=25mm]{geometry}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{amsmath,amssymb}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{pdflscape}
+\usepackage{fancyhdr}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[hidelinks]{hyperref}
+\usepackage[nameinlink,noabbrev]{cleveref}
+
+\graphicspath{{figures/}{../results/}{../docs/assets/}}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55em}
+\setlist{nosep,leftmargin=*}
+\renewcommand{\arraystretch}{1.18}
+\captionsetup{font=small,labelfont=bf}
+\hypersetup{
+  pdftitle={Nebula: Simulation-in-the-Loop Optimization of a PCIe Gen-2-Oriented Receiver Equalizer - Submitted for the Astera Labs Nebula Competition: AI/ML for Analog Design},
+  pdfauthor={Dwiti Suchak, Vyom Tatke, Abhay Badoni},
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=black,
+  urlcolor=blue!55!black
+}
+
+\definecolor{codebg}{RGB}{247,248,250}
+\definecolor{codeframe}{RGB}{215,219,224}
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{codeframe},
+  breaklines=true,
+  columns=fullflexible,
+  showstringspaces=false,
+  upquote=true
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{Nebula Technical Report}
+\fancyhead[R]{Team ANULOG}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\projecturl}{https://github.com/dwiti-25/nebula}
+\newcommand{\statuspass}{\textbf{PASS}}
+\newcommand{\statusnc}{\textbf{NOT EVALUATED}}
+
+\begin{document}
+
+\begin{titlepage}
+  \centering
+  \vspace*{28mm}
+  {\Huge\bfseries Nebula\par}
+  \vspace{5mm}
+  {\LARGE Simulation-in-the-Loop Optimization of a\\[2mm]
+  PCIe Gen-2-Oriented Receiver Equalizer\par}
+  \vspace{14mm}
+  {\Large\bfseries Submitted for the Astera Labs Nebula Competition:\par}
+  \vspace{2mm}
+  {\large\bfseries AI/ML for Analog Design\par}
+  \vspace{10mm}
+  {\large Technical Project Report\par}
+  \vfill
+  {\large\bfseries Team ANULOG\par}
+  \vspace{3mm}
+  {\large Dwiti Suchak \quad Vyom Tatke \quad Abhay Badoni\par}
+  \vspace{14mm}
+  {\normalsize Repository: \href{\projecturl}{\projecturl}\par}
+  \vspace{4mm}
+  {\normalsize September 2026\par}
+  \vspace*{18mm}
+\end{titlepage}
+
+\pagenumbering{roman}
+\input{sections/abstract}
+\tableofcontents
+\listoffigures
+\listoftables
+\clearpage
+\pagenumbering{arabic}
+
+\input{sections/introduction}
+\input{sections/requirements}
+\input{sections/competition-alignment}
+\input{sections/architecture}
+\input{sections/models}
+\input{sections/methodology}
+\input{sections/optimization}
+\input{sections/experiments}
+\input{sections/results}
+\input{sections/usage}
+\input{sections/discussion}
+\input{sections/conclusion}
+
+\appendix
+\input{sections/reproducibility}
+\input{sections/code-map}
+\input{sections/additional-figures}
+
+\bibliographystyle{IEEEtranN}
+\bibliography{references}
+
+\end{document}

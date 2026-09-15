@@ -1,0 +1,93 @@
+\chapter{Using the Code}
+
+The repository is available at \href{\projecturl}{\projecturl}. Python 3.10 or
+newer, NumPy, ngspice, and a compatible SKY130A ngspice model library are
+required for real-circuit evaluation. Commands below assume the repository root
+as the working directory.
+
+\section{Create an environment}
+
+\begin{lstlisting}[language=bash]
+python -m venv .venv
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+\end{lstlisting}
+
+Set the external tools without committing machine-specific paths:
+
+\begin{lstlisting}[language=bash]
+$env:NGSPICE_EXECUTABLE = "C:\path\to\ngspice_con.exe"
+$env:SKY130_MODEL_LIBRARY = "C:\path\to\sky130.lib.spice"
+\end{lstlisting}
+
+\section{Run the regression suite}
+
+\begin{lstlisting}[language=bash]
+python -m unittest discover -v
+\end{lstlisting}
+
+Tests requiring the SKY130 model are skipped when the model variable is not
+configured. The exact executed, passed, failed, and skipped counts should be
+recorded together with the date, commit, and interpreter.
+
+\section{Evaluate one receiver design}
+
+\begin{lstlisting}[language=bash]
+python -m experiments.evaluate_receiver --fidelity training
+\end{lstlisting}
+
+To use the included public development channel:
+
+\begin{lstlisting}[language=bash]
+python -m experiments.evaluate_receiver \
+  --channel channels/ieee802_ibm_20db_thru.s4p \
+  --channel-ports 1 3 2 4 --fidelity candidate
+\end{lstlisting}
+
+The port order is one-based and represents TXP, TXN, RXP, and RXN. It should be
+overridden only from documented channel-port information.
+
+\section{Train or run the optimization pipeline}
+
+Inspect the complete command-line options before starting an expensive run:
+
+\begin{lstlisting}[language=bash]
+python -m experiments.run_autockt_pipeline --help
+python -m experiments.train_rl --help
+\end{lstlisting}
+
+Use a synthetic backend for a fast software-path check and the real backend for
+electrical evidence. Training and inference must be distinguished: training
+updates policy weights, while inference loads a fixed checkpoint and generates
+candidates.
+
+\section{Launch the local interface}
+
+\begin{lstlisting}[language=bash]
+python experiments/web_ui.py --port 8001
+\end{lstlisting}
+
+Open \url{http://127.0.0.1:8001}. Choose the backend, target, checkpoint,
+channel, PVT scope, and optional final measurements. ``None'' is nominal-only;
+``smoke'' is a diagnostic and not a robustness proof; larger PVT sets can take
+hours. Preserve the generated JSON, event log, graph, schematic, and eye
+artifact for every result quoted in a report.
+
+The reviewed UI accepts four structured numeric target fields. It is not a
+natural-language interface. If an LLM wrapper is added later, it should only map
+text to a validated \code{TargetSpec} and pipeline configuration; all electrical
+verdicts must continue to come from the simulator and deterministic assessment
+code.
+
+\section{Build this report}
+
+From the \code{report/} directory:
+\begin{lstlisting}[language=bash]
+pdflatex main.tex
+bibtex main
+pdflatex main.tex
+pdflatex main.tex
+\end{lstlisting}
+The same source can be uploaded to Overleaf. The two supplied CTLE/receiver PDFs
+are retained as vector figures, so no raster conversion is required.

@@ -126,41 +126,14 @@ PVT_CONDITION_SETS: dict[str, Optional[tuple[SimulationConditions, ...]]] = {
     "full36": QUALIFICATION_PVT_GRID,
 }
 
-# Runtime diagnosis (docs/autockt-mapping.md sec 24 / RUNTIME investigation):
-# select_final_design's own fidelity default (EvaluationFidelity.FINAL) was
-# being silently inherited by EVERY non-"none" PVT set, including "smoke" --
-# whose whole design intent (see the --pvt-condition-set help text below) is
-# to be the CHEAP, small-condition-count option. A direct diagnostic (one
-# known-good candidate, both smoke conditions, real ngspice) measured
-# ~281-290s per condition at FINAL fidelity, ~571s combined for just ONE
-# candidate -- legitimate, successful computation (no hang, no crash, no
-# convergence failure) that nonetheless looks indistinguishable from a hung
-# UI run, since nothing surfaces stage-level progress.
-#
-# CANDIDATE fidelity runs the IDENTICAL stage set as FINAL (verified by
-# reading simulator/receiver.py directly: dc/ac/ctle_transient/channel_
-# diagnostics/noise/hd3/transient are all gated at <=CANDIDATE) -- FINAL
-# only adds a 3-amplitude HD3 characterization sweep (characterize=True)
-# instead of CANDIDATE's single amplitude, which changes HD3 METRIC VALUES
-# only. analysis.pvt_selection.run_pvt_evaluation reads only
-# evaluation.success/failed_stage (never .metrics) to build PVTPointResult,
-# and select_with_trade_off_preference's tie-break reads the candidate's
-# already-computed NOMINAL metrics (from generate_candidates), never
-# anything produced by the PVT sweep itself -- so PVT feasibility and
-# "most robust"/trade-off selection use zero information FINAL adds over
-# CANDIDATE. CANDIDATE is fidelity-sufficient for this consumer, and roughly
-# halves the HD3 stage's contribution (~70-86s -> ~23-29s per condition,
-# confirmed by direct measurement of both fidelities on the same candidate).
-#
-# "minimal27" (partial coverage) and "full36" deliberately keep FINAL --
-# only "smoke" (explicitly a cheap pre-check, never itself a robustness
-# claim) is downgraded. Explicit per-named-set mapping, not a change to
-# select_final_design's own default (still FINAL for any caller that
-# doesn't pass pvt_fidelity, e.g. existing tests/other call sites).
+# Default staged qualification: 512-bit corners, then nominal 1024-bit validation
+# (--pvt-pattern-bits 1024 opts into FINAL fidelity at corners).
+# before any real-PVT selected circuit can be exported. The longer pattern
+# and three-amplitude HD3 sweep are not claimed at every corner.
 PVT_CONDITION_SET_FIDELITY: dict[str, EvaluationFidelity] = {
     "smoke": EvaluationFidelity.CANDIDATE,
-    "minimal27": EvaluationFidelity.FINAL,
-    "full36": EvaluationFidelity.FINAL,
+    "minimal27": EvaluationFidelity.CANDIDATE,
+    "full36": EvaluationFidelity.CANDIDATE,
 }
 
 
@@ -375,6 +348,7 @@ def select_final_design(
     *,
     pvt_conditions: Optional[tuple] = None,
     pvt_fidelity=None,
+    simulator_timeout_s: float | None = None,
     minimum_pass_rate: float = 1.0,
     trade_off_preference: str = "most_robust",
     target: Optional[TargetSpec] = None,
@@ -413,10 +387,14 @@ def select_final_design(
         }
 
     fidelity = pvt_fidelity or EvaluationFidelity.FINAL
+    evaluator_kwargs = _channel_evaluator_kwargs(channel_path, channel_port_map)
+    if simulator_timeout_s is not None:
+        from simulator.ngspice import NgSpiceConfig
+        evaluator_kwargs["ngspice"] = NgSpiceConfig(timeout_s=simulator_timeout_s)
     pvt_results: list[PVTRobustnessResult] = [
         run_pvt_evaluation(
             d, pvt_conditions, fidelity=fidelity, target=target,
-            evaluator_kwargs=_channel_evaluator_kwargs(channel_path, channel_port_map),
+            evaluator_kwargs=evaluator_kwargs,
         ) for d in designs
     ]
     top = select_with_trade_off_preference(
@@ -510,6 +488,7 @@ def measure_hd3_and_noise(
     channel_path: str | Path = SYNTHETIC_CHANNEL_PATH,
     channel_port_map: ChannelPortMap = ChannelPortMap(),
     eye_capture: Optional[dict[str, Any]] = None,
+    simulator_timeout_s: float | None = None,
 ) -> dict[str, Any]:
     """Runs the existing, unmodified evaluate_receiver at FINAL fidelity for
     one design at nominal conditions -- the only fidelity level at which
@@ -521,6 +500,9 @@ def measure_hd3_and_noise(
     """
 
     evaluator_kwargs = _channel_evaluator_kwargs(channel_path, channel_port_map)
+    if simulator_timeout_s is not None:
+        from simulator.ngspice import NgSpiceConfig
+        evaluator_kwargs["ngspice"] = NgSpiceConfig(timeout_s=simulator_timeout_s)
     # Keep the established evaluator call shape unless waveform capture was
     # explicitly requested. This also preserves compatibility with external
     # evaluator adapters that implement the pre-eye-diagram interface.
@@ -638,6 +620,7 @@ def run_pipeline(
     initial_indices_source: str = "verified",
     pvt_conditions: Optional[tuple] = None,
     pvt_fidelity: Optional[EvaluationFidelity] = None,
+    simulator_timeout_s: float | None = None,
     trade_off_preference: str = "most_robust",
     measure_hd3_noise_flag: bool = False,
     export_schematic_to: Optional[Path] = None,
@@ -649,6 +632,11 @@ def run_pipeline(
     channel_path: str | Path = SYNTHETIC_CHANNEL_PATH,
     channel_port_map: ChannelPortMap = ChannelPortMap(),
 ) -> dict[str, Any]:
+    if simulator_timeout_s is not None:
+        from simulator.ngspice import NgSpiceConfig
+        NgSpiceConfig(timeout_s=simulator_timeout_s)
+    if pvt_conditions and pvt_fidelity is None:
+        pvt_fidelity = EvaluationFidelity.CANDIDATE
     problems = validate_target(target)
     if problems:
         raise ValueError(f"invalid target specification: {problems}")
@@ -690,6 +678,7 @@ def run_pipeline(
         try:
             selection = select_final_design(
                 feasible, pvt_conditions=pvt_conditions, pvt_fidelity=pvt_fidelity,
+                simulator_timeout_s=simulator_timeout_s,
                 trade_off_preference=trade_off_preference, target=target,
                 channel_path=channel_path, channel_port_map=channel_port_map,
             )
@@ -698,6 +687,7 @@ def run_pipeline(
     else:
         selection = select_final_design(
             feasible, pvt_conditions=pvt_conditions, pvt_fidelity=pvt_fidelity,
+            simulator_timeout_s=simulator_timeout_s,
             trade_off_preference=trade_off_preference, target=target,
             channel_path=channel_path, channel_port_map=channel_port_map,
         )
@@ -715,6 +705,10 @@ def run_pipeline(
         },
         "n_candidates_generated": len(candidates),
         "n_nominally_feasible": len(feasible),
+        "simulator_timeout_s": simulator_timeout_s,
+        "pvt_fidelity": (pvt_fidelity or EvaluationFidelity.FINAL).name if pvt_conditions else None,
+        "pvt_pattern_bits": (512 if pvt_fidelity == EvaluationFidelity.CANDIDATE else 1024) if pvt_conditions else None,
+        "saved_candidates": [{"design_id": f"pipeline_ep{c.episode}", "parameters": c.parameters, "metrics": c.metrics} for c in feasible],
         "selection": selection,
         "candidate_assessments": [
             {
@@ -729,11 +723,12 @@ def run_pipeline(
     }
 
     eye_capture: dict[str, Any] = {}
-    if selection["selected"] is not None and measure_hd3_noise_flag and backend == "real":
+    if selection["selected"] is not None and (measure_hd3_noise_flag or pvt_conditions) and backend == "real":
         refinement = measure_hd3_and_noise(
             selection["selected"]["parameters"], channel_path=channel_path,
             channel_port_map=channel_port_map,
             eye_capture=eye_capture if eye_diagram_output is not None else None,
+            simulator_timeout_s=simulator_timeout_s,
         )
         result["hd3_noise_refinement"] = {
             "attempted": True, "success": refinement["success"], "failed_stage": refinement["failed_stage"],
@@ -828,6 +823,10 @@ def _main() -> int:
     parser.add_argument("--horizon", type=int, default=4)
     parser.add_argument("--search-seconds", type=float, default=None)
     parser.add_argument("--max-evaluations", type=int, default=1000)
+    parser.add_argument("--pvt-pattern-bits", type=int, choices=(512, 1024), default=512,
+                        help="Corner pattern length; 1024 uses FINAL fidelity including three-amplitude HD3.")
+    parser.add_argument("--simulator-timeout-seconds", type=float, default=360,
+                        help="Per-SPICE-invocation timeout for PVT and nominal final validation; does not lengthen training screening.")
     parser.add_argument("--agent-seed", type=int, default=42)
     parser.add_argument("--eval-seed", type=int, default=42)
     parser.add_argument("--randomize-initial-state", action="store_true", default=True)
@@ -837,13 +836,14 @@ def _main() -> int:
                          help="'none' (default, unchanged behavior): NOMINAL-ONLY selection -- the selected design "
                               "is NOT validated across process/voltage/temperature, only at nominal TT/1.8V/27C; "
                               "do not read a 'none' run as PVT-robust. 'smoke': 2 conditions (nominal TT + one "
-                              "stress corner), evaluated at EvaluationFidelity.CANDIDATE (not FINAL -- CANDIDATE "
+                              "stress corner), defaulting to EvaluationFidelity.CANDIDATE (CANDIDATE "
                               "runs the identical stage set and is sufficient for pass/fail feasibility and "
                               "trade-off selection, see PVT_CONDITION_SET_FIDELITY's comment) -- exercises the "
                               "PVT-aware selection pathway with real SPICE, still NOT a robustness proof. "
                               "'minimal27': a 27-condition TT/SS/FF subset, not full coverage. "
                               "'full36': the agreed TT/SS/FF, three-voltage, four-temperature grid. "
-                              "Both use FINAL fidelity, are expensive, and are never selected automatically.")
+                              "Both default to 512-bit CANDIDATE fidelity; --pvt-pattern-bits 1024 selects FINAL. "
+                              "A selected real design also requires nominal 1024-bit final validation.")
     parser.add_argument("--trade-off-preference", choices=("most_robust", "lowest_power", "strongest_eye_height",
                                                              "widest_eye", "largest_margin", "balanced", "lowest_partial_mos_area", "lowest_noise"),
                          default="most_robust")
@@ -881,7 +881,9 @@ def _main() -> int:
         randomize_initial_state=args.randomize_initial_state,
         initial_indices_source=args.initial_indices_source,
         pvt_conditions=PVT_CONDITION_SETS[args.pvt_condition_set],
-        pvt_fidelity=PVT_CONDITION_SET_FIDELITY.get(args.pvt_condition_set),
+        pvt_fidelity=(EvaluationFidelity.CANDIDATE if args.pvt_pattern_bits == 512 else EvaluationFidelity.FINAL)
+                     if args.pvt_condition_set != "none" else None,
+        simulator_timeout_s=args.simulator_timeout_seconds,
         trade_off_preference=args.trade_off_preference,
         measure_hd3_noise_flag=args.measure_hd3_noise,
         export_schematic_to=args.export_schematic,

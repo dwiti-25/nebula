@@ -28,6 +28,23 @@ from experiments import web_ui
 
 
 class ValidateRequestTests(unittest.TestCase):
+    def test_pvt_pattern_bits_validation_and_argv(self):
+        for value in (128, 2048, None, "1024"):
+            self.assertTrue(web_ui._validate_request(self._base(pvt_pattern_bits=value)))
+        for bits in (512, 1024):
+            payload = self._base(pvt_pattern_bits=bits)
+            self.assertEqual(web_ui._validate_request(payload), [])
+            argv = web_ui._build_argv(payload, output_path=Path("new.json"), schematic_path=Path("new.cir"))
+            self.assertEqual(argv[argv.index("--pvt-pattern-bits") + 1], str(bits))
+
+    def test_simulator_timeout_validation_and_argv(self):
+        for value in (0, -1, float("nan"), float("inf"), True, 3601):
+            self.assertTrue(web_ui._validate_request(self._base(simulator_timeout_seconds=value)))
+        payload = self._base(simulator_timeout_seconds=720)
+        self.assertEqual(web_ui._validate_request(payload), [])
+        argv = web_ui._build_argv(payload, output_path=Path("new.json"), schematic_path=Path("new.cir"))
+        self.assertEqual(argv[argv.index("--simulator-timeout-seconds") + 1], "720")
+
     def _base(self, **overrides):
         payload = {
             "target_mode": "trivial", "backend": "synthetic", "checkpoint": None,
@@ -307,6 +324,12 @@ class ManualTargetEntryUiIntactTests(unittest.TestCase):
         self.assertIn("'/api/evidence'", web_ui.INDEX_HTML)
         self.assertIn("renderChart", web_ui.INDEX_HTML)
         self.assertIn("chartGrid", web_ui.INDEX_HTML)
+
+    def test_historical_run_ui_renders_saved_results_and_pvt_values(self):
+        self.assertIn("`/api/result/${runId}`", web_ui.INDEX_HTML)
+        self.assertIn('id="pvtRows"', web_ui.INDEX_HTML)
+        self.assertIn("m.dfe_locked_phase_eye_height_v", web_ui.INDEX_HTML)
+        self.assertIn("m.input_referred_noise_vrms", web_ui.INDEX_HTML)
 
 
 class SubprocessTimeoutTests(unittest.TestCase):
@@ -734,6 +757,26 @@ class HttpIntegrationTests(unittest.TestCase):
     def test_unknown_run_id_returns_404(self):
         status, data = self._get("/api/status/" + "0" * 32)
         self.assertEqual(status, 404)
+
+    def test_saved_historical_result_can_be_loaded(self):
+        run_id = "07acbcab1cd346cca24eab31919496c0"
+        result_path = web_ui.RUNS_DIR / f"{run_id}.json"
+        if not result_path.is_file():
+            self.skipTest("recorded 27-corner UI run is not present in this checkout")
+        status, payload = self._get(f"/api/result/{run_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["run_id"], run_id)
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["result"]["pvt_pattern_bits"], 512)
+        self.assertEqual(payload["result"]["selection"]["pvt"]["n_conditions"], 27)
+
+    def test_unknown_historical_result_returns_404(self):
+        status, data = self._get("/api/result/" + "0" * 32)
+        self.assertEqual(status, 404)
+
+    def test_malformed_historical_result_id_returns_400(self):
+        status, data = self._get("/api/result/not-a-valid-id")
+        self.assertEqual(status, 400)
 
     def test_malformed_run_id_returns_400(self):
         status, data = self._get("/api/status/not-a-valid-id")

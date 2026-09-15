@@ -183,7 +183,7 @@ class SelectFinalDesignTests(unittest.TestCase):
         ]
         conditions = (SimulationConditions(ProcessCorner.TT, 27.0, 1.8),)
 
-        def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity):
+        def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity, **kwargs):
             # episode-0 design (rload=1000) always passes; episode-1 (rload=2000) always fails
             success = parameters.rload_ohm == 1000.0
             return tuple(
@@ -242,7 +242,7 @@ class SelectFinalDesignTests(unittest.TestCase):
         ]
         conditions = (SimulationConditions(ProcessCorner.TT, 27.0, 1.8),)
 
-        def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity):
+        def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity, **kwargs):
             # both designs pass at every condition -- a genuine tie.
             return tuple(
                 ReceiverEvaluation(True, parameters, c, fidelity, (), {}, None, 0.0, "id", {})
@@ -300,7 +300,7 @@ class PvtResultFlowsIntoFinalSpecificationTests(unittest.TestCase):
         conditions = (SimulationConditions(ProcessCorner.TT, 27.0, 1.8),
                       SimulationConditions(ProcessCorner.FF, 125.0, 1.71))
 
-        def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity):
+        def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity, **kwargs):
             metrics = {
                 "dfe_locked_phase_eye_height_v": 1.0,
                 "dfe_eye_width_ui": 0.8,
@@ -370,6 +370,23 @@ class MeasureHd3AndNoiseTests(unittest.TestCase):
 
 
 class RunPipelineHd3NoiseRefinementTests(unittest.TestCase):
+    def test_real_pvt_requires_nominal_final_even_when_optional_flag_is_off(self):
+        from simulator.receiver import EvaluationFidelity
+        from simulator.config import SimulationConditions
+        candidates = self._feasible_candidates()
+        selection = {"selected": {"design_id": "pipeline_ep0", "parameters": candidates[0].parameters,
+                                  "metrics": candidates[0].metrics}, "pvt": None}
+        with patch("experiments.run_autockt_pipeline.generate_candidates", return_value=candidates), \
+             patch("experiments.run_autockt_pipeline.select_final_design", return_value=selection), \
+             patch("experiments.run_autockt_pipeline.measure_hd3_and_noise",
+                   return_value={"success": False, "metrics": {}, "failed_stage": "transient"}) as final:
+            result = run_pipeline(target=TargetSpec.from_existing_thresholds(), checkpoint_path=None,
+                                  backend="real", pvt_conditions=(SimulationConditions(),),
+                                  pvt_fidelity=EvaluationFidelity.CANDIDATE, simulator_timeout_s=360)
+        self.assertIsNone(result["selection"]["selected"])
+        self.assertEqual(result["pvt_pattern_bits"], 512)
+        self.assertEqual(final.call_args.kwargs["simulator_timeout_s"], 360)
+
     def test_incomplete_finalist_clears_selection(self):
         from simulator.receiver import ReceiverEvaluation
         def incomplete(parameters, conditions, fidelity):
@@ -469,10 +486,10 @@ class PvtConditionSetsAuditTests(unittest.TestCase):
         from simulator.receiver import EvaluationFidelity
         self.assertEqual(PVT_CONDITION_SET_FIDELITY["smoke"], EvaluationFidelity.CANDIDATE)
 
-    def test_minimal27_still_maps_to_final_fidelity_unchanged(self):
+    def test_minimal27_maps_to_512_bit_candidate_fidelity(self):
         # The actual robustness proof must not be weakened.
         from simulator.receiver import EvaluationFidelity
-        self.assertEqual(PVT_CONDITION_SET_FIDELITY["minimal27"], EvaluationFidelity.FINAL)
+        self.assertEqual(PVT_CONDITION_SET_FIDELITY["minimal27"], EvaluationFidelity.CANDIDATE)
 
     def test_none_never_reaches_pvt_evaluation_so_has_no_fidelity_to_choose(self):
         # "none" skips select_final_design's PVT branch entirely (pvt_conditions
@@ -532,7 +549,7 @@ class CLIIntegrationTests(unittest.TestCase):
         # result must reach the final specification report's PVT row.
         from simulator.receiver import ReceiverEvaluation
 
-        def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity):
+        def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity, **kwargs):
             return tuple(
                 ReceiverEvaluation(True, parameters, c, fidelity, (), {}, None, 0.0, "id", {})
                 for c in conditions
@@ -572,7 +589,7 @@ class CLIIntegrationTests(unittest.TestCase):
 
         seen_fidelities = []
 
-        def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity):
+        def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity, **kwargs):
             seen_fidelities.append(fidelity)
             return tuple(
                 ReceiverEvaluation(True, parameters, c, fidelity, (), {}, None, 0.0, "id", {})
@@ -598,12 +615,12 @@ class CLIIntegrationTests(unittest.TestCase):
                 self.assertEqual(result["selection"]["pvt"]["pass_rate"], 1.0)
                 self.assertTrue(result["selection"]["pvt"]["met_minimum_pass_rate"])
 
-    def test_minimal27_end_to_end_still_reaches_evaluate_pvt_grid_at_final_fidelity(self):
+    def test_minimal27_end_to_end_uses_candidate_fidelity(self):
         from simulator.receiver import EvaluationFidelity, ReceiverEvaluation
 
         seen_fidelities = []
 
-        def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity):
+        def fake_evaluate_pvt_grid(parameters, *, conditions, fidelity, **kwargs):
             seen_fidelities.append(fidelity)
             return tuple(
                 ReceiverEvaluation(True, parameters, c, fidelity, (), {}, None, 0.0, "id", {})
@@ -625,7 +642,7 @@ class CLIIntegrationTests(unittest.TestCase):
             result = json.loads(output.read_text(encoding="utf-8"))
             if result["selection"]["selected"] is not None:
                 self.assertTrue(seen_fidelities, "expected evaluate_pvt_grid to be called at least once")
-                self.assertTrue(all(f == EvaluationFidelity.FINAL for f in seen_fidelities))
+                self.assertTrue(all(f == EvaluationFidelity.CANDIDATE for f in seen_fidelities))
 
     def test_target_json_flag_builds_an_arbitrary_target(self):
         import json as _json

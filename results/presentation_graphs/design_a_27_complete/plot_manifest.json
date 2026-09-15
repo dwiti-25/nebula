@@ -1,0 +1,21 @@
+{
+  "source_artifact": "C:\\Vyom\\AL Code\\nebula-integration\\results\\archived_phase2\\design_a_pvt_minimal27_rerun.jsonl",
+  "source_status": "complete",
+  "method": "Regenerated AC-only traces using circuits/benches/ctle_ac.cir",
+  "parameters": {
+    "rload_ohm": 2342.472156058411,
+    "rdeg_ohm": 822.3558626926603,
+    "cdeg_f": 9.999375862792168e-13,
+    "itail_a": 0.0006028331705063624,
+    "dfe_tap_v": -0.011090823885148815,
+    "mos_width_um": 10.0,
+    "mos_length_um": 0.15,
+    "mos_multiplier": 1
+  },
+  "condition_count": 27,
+  "limitations": [
+    "These plots establish AC response only.",
+    "They do not complete transient, noise, HD3, eye, or full PVT qualification.",
+    "Peak markers use the repository's 1.25\u20132.5 GHz intended-band definition."
+  ]
+}

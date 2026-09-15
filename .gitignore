@@ -38,3 +38,8 @@ venv/
 local_backup/
 .local-validation/
 external/channel_candidates/
+# Local document-inspection extracts and resumable simulation cache
+docs/assets/deck_read_*/
+docs/assets/demo-deck-inspection/
+results/pvt_restart_cache/
+results/pvt27_restart_1024_360.json

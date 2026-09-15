@@ -1,0 +1,40 @@
+\chapter{Design Requirements and Evaluation Scope}
+
+Nebula represents a target using minimum locked-phase eye height, minimum eye
+width, minimum decision margin, and maximum CTLE power. Peaking, HD3, integrated
+noise, and observed DFE errors are additional evaluator gates when their stages
+are enabled. These are project-defined engineering targets unless an external
+requirement is explicitly cited.
+
+\begin{table}[htbp]
+\centering
+\caption{Principal receiver targets and their precise implementation scope.}
+\label{tab:requirements}
+\begin{tabularx}{\textwidth}{@{}l S[table-format=2.3] l X@{}}
+\toprule
+Metric & {Target} & Unit & Interpretation \\
+\midrule
+Locked-phase DFE eye height & 0.1 & V & Lower bound on the behavioral DFE metric. \\
+DFE eye width & 0.4 & UI & Lower bound over the simulated finite bit pattern. \\
+DFE decision margin & 0.0 & V & Corrected sample margin at the locked phase. \\
+CTLE power & 0.015 & W & Upper bound for CTLE supply power, not total receiver power. \\
+HD3 & -30 & dB & Upper bound for the implemented \SI{100}{MHz} tone test. \\
+Input-referred noise & 1.5 & mV RMS & Upper bound integrated from \SI{10}{MHz} to \SI{5}{GHz}. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The phrases ``eye height'' and ``power'' are otherwise ambiguous. This report
+therefore uses exact names such as \emph{locked-phase DFE eye height} and
+\emph{CTLE power}. Zero observed errors always refers to the evaluated finite
+sequence; it is not a bit-error-rate guarantee.
+
+\section{Qualification sets}
+
+The implementation defines a 60-condition grid from five process corners
+(TT, SS, FF, SF, and FS), three supply voltages, and four temperatures. The
+primary completed run instead evaluates 27 conditions: TT/SS/FF,
+\SIlist{1.71;1.80;1.89}{V}, and \SIlist{0;27;125}{\degreeCelsius}. It omits
+\SI{75}{\degreeCelsius}, SF, and FS. Throughout this report, ``demonstrated
+reduced 27-condition grid'' names this recorded result; ``extended 60-condition
+grid'' names the uncompleted competition-aligned scope.
